@@ -1,25 +1,16 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import {
+  listarClientes,
+  crearCliente,
+  obtenerCliente,
+  actualizarCliente,
+} from '../controllers/clientesController';
 
 const router = Router();
 
-// GET /api/clientes — listar clientes del estudio
-router.get('/', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// POST /api/clientes — crear cliente
-router.post('/', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// GET /api/clientes/:id — obtener cliente por id
-router.get('/:id', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// PATCH /api/clientes/:id — actualizar cliente
-router.patch('/:id', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
+router.get('/', listarClientes);
+router.post('/', crearCliente);
+router.get('/:id', obtenerCliente);
+router.patch('/:id', actualizarCliente);
 
 export default router;

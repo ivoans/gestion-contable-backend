@@ -1,25 +1,16 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import {
+  listarImpuestos,
+  crearImpuesto,
+  obtenerImpuesto,
+  cambiarEstadoImpuesto,
+} from '../controllers/impuestosController';
 
 const router = Router();
 
-// GET /api/impuestos — listar impuestos (filtrados por rol)
-router.get('/', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// POST /api/impuestos — crear impuesto
-router.post('/', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// GET /api/impuestos/:id — obtener impuesto por id
-router.get('/:id', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
-
-// PATCH /api/impuestos/:id/estado — cambiar estado (pendiente → pagado)
-router.patch('/:id/estado', async (_req: Request, res: Response) => {
-  res.status(501).json({ error: 'Not implemented' });
-});
+router.get('/', listarImpuestos);
+router.post('/', crearImpuesto);
+router.get('/:id', obtenerImpuesto);
+router.patch('/:id/estado', cambiarEstadoImpuesto);
 
 export default router;
