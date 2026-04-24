@@ -4,7 +4,7 @@ export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido';
 
 export interface User {
   id: string;
-  estudio_id: string;
+  estudio_id: string | null;
   nombre: string;
   email: string;
   role: Role;
@@ -51,5 +51,5 @@ export interface JwtPayload {
   id: string;
   email: string;
   role: Role;
-  estudio_id: string;
+  estudio_id: string | null;
 }
