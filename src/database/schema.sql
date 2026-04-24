@@ -1,0 +1,129 @@
+-- ============================================================
+-- SISTEMA DE GESTIÓN CONTABLE
+-- Schema v1.0
+-- ============================================================
+
+-- Extensión para UUIDs
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================================
+-- ENUMS
+-- ============================================================
+
+CREATE TYPE role AS ENUM ('admin', 'contador', 'cliente');
+CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado');
+CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido');
+
+-- ============================================================
+-- TABLA: estudios
+-- ============================================================
+
+CREATE TABLE estudios (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre      VARCHAR(255) NOT NULL,
+  activo      BOOLEAN NOT NULL DEFAULT true,
+  created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
+-- TABLA: users
+-- ============================================================
+
+CREATE TABLE users (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID REFERENCES estudios(id) ON DELETE RESTRICT,
+  nombre        VARCHAR(255) NOT NULL,
+  email         VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role          role NOT NULL,
+  cuit          VARCHAR(13),
+  telefono      VARCHAR(20),
+  activo        BOOLEAN NOT NULL DEFAULT true,
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  -- El admin global no tiene estudio, todos los demás sí
+  CONSTRAINT chk_estudio_por_role CHECK (
+    (role = 'admin' AND estudio_id IS NULL) OR
+    (role != 'admin' AND estudio_id IS NOT NULL)
+  )
+);
+
+-- ============================================================
+-- TABLA: impuestos
+-- ============================================================
+
+CREATE TABLE impuestos (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id        UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  creado_por        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  tipo              VARCHAR(100) NOT NULL,
+  monto             DECIMAL(12, 2) NOT NULL CHECK (monto > 0),
+  fecha_vencimiento DATE NOT NULL,
+  descripcion       TEXT,
+  link_pago         VARCHAR(500),
+  estado            estado_impuesto NOT NULL DEFAULT 'pendiente',
+  pagado_at         TIMESTAMP WITH TIME ZONE,
+  pagado_por        UUID REFERENCES users(id) ON DELETE RESTRICT,
+  created_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  -- Si está pagado, tiene que tener pagado_at y pagado_por
+  CONSTRAINT chk_pagado_completo CHECK (
+    (estado = 'pagado' AND pagado_at IS NOT NULL AND pagado_por IS NOT NULL) OR
+    (estado != 'pagado' AND pagado_at IS NULL AND pagado_por IS NULL)
+  )
+);
+
+-- ============================================================
+-- TABLA: notificaciones
+-- ============================================================
+
+CREATE TABLE notificaciones (
+  id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  impuesto_id  UUID NOT NULL REFERENCES impuestos(id) ON DELETE CASCADE,
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tipo         tipo_notificacion NOT NULL,
+  canal        VARCHAR(20) NOT NULL DEFAULT 'email',
+  enviada_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
+-- ÍNDICES
+-- ============================================================
+
+-- users
+CREATE INDEX idx_users_estudio_id ON users(estudio_id);
+CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_email ON users(email);
+
+-- impuestos
+CREATE INDEX idx_impuestos_cliente_id ON impuestos(cliente_id);
+CREATE INDEX idx_impuestos_estudio_id ON impuestos(estudio_id);
+CREATE INDEX idx_impuestos_estado ON impuestos(estado);
+CREATE INDEX idx_impuestos_fecha_vencimiento ON impuestos(fecha_vencimiento);
+-- Índice compuesto para el cron job (busca pendientes vencidos todos los días)
+CREATE INDEX idx_impuestos_cron ON impuestos(estado, fecha_vencimiento)
+  WHERE estado = 'pendiente';
+
+-- notificaciones
+CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
+-- Índice compuesto para el anti-duplicado del cron
+CREATE INDEX idx_notificaciones_dedup ON notificaciones(impuesto_id, tipo);
+
+-- ============================================================
+-- TRIGGER: updated_at automático en impuestos
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_impuestos_updated_at
+  BEFORE UPDATE ON impuestos
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
