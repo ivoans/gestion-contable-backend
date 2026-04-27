@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { supabase } from '../lib/supabase';
 import { Impuesto, EstadoImpuesto } from '../types';
+import { sendNuevoImpuesto } from '../services/emailService';
 
 export async function crearImpuesto(req: Request, res: Response): Promise<void> {
   const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, link_pago } = req.body as {
@@ -64,7 +65,36 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    res.status(201).json(data as Impuesto);
+    const nuevoImpuesto = data as Impuesto;
+
+    try {
+      const { data: clienteData } = await supabase
+        .from('users')
+        .select('email, nombre')
+        .eq('id', cliente_id)
+        .single();
+
+      if (clienteData) {
+        await sendNuevoImpuesto(clienteData.email, {
+          nombre: clienteData.nombre,
+          tipo: nuevoImpuesto.tipo,
+          monto: nuevoImpuesto.monto,
+          fecha_vencimiento: nuevoImpuesto.fecha_vencimiento,
+          link_pago: nuevoImpuesto.link_pago ?? undefined,
+        });
+
+        await supabase.from('notificaciones').insert({
+          impuesto_id: nuevoImpuesto.id,
+          user_id: cliente_id,
+          tipo: 'nuevo',
+          canal: 'email',
+        });
+      }
+    } catch (emailErr) {
+      console.error('[crearImpuesto] Email fail, impuesto creado OK:', emailErr);
+    }
+
+    res.status(201).json(nuevoImpuesto);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }

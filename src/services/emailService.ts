@@ -1,58 +1,129 @@
 import { Resend } from 'resend';
 
 const resend = new Resend(process.env.RESEND_API_KEY!);
-const FROM = 'Gestión Contable <no-reply@tudominio.com>';
+
+// Cambiar este valor en .env con EMAIL_FROM o editar directamente el fallback
+const FROM = process.env.EMAIL_FROM ?? 'Sistema Contable <notificaciones@tudominio.com>';
+
+function formatFecha(fecha: string): string {
+  const [y, m, d] = fecha.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+function formatMonto(monto: number): string {
+  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(monto);
+}
 
 export async function sendNuevoImpuesto(
   to: string,
-  data: { nombre: string; tipo: string; monto: number; fecha_vencimiento: string }
-) {
-  await resend.emails.send({
-    from: FROM,
-    to,
-    subject: `Nuevo impuesto asignado: ${data.tipo}`,
-    html: `
-      <h2>Nuevo impuesto asignado</h2>
-      <p>Hola ${data.nombre},</p>
-      <p>Se te ha asignado un nuevo impuesto:</p>
-      <ul>
-        <li><strong>Tipo:</strong> ${data.tipo}</li>
-        <li><strong>Monto:</strong> $${data.monto.toFixed(2)}</li>
-        <li><strong>Vencimiento:</strong> ${data.fecha_vencimiento}</li>
-      </ul>
-    `,
-  });
+  data: {
+    nombre: string;
+    tipo: string;
+    monto: number;
+    fecha_vencimiento: string;
+    link_pago?: string;
+  }
+): Promise<void> {
+  const fechaFormateada = formatFecha(data.fecha_vencimiento);
+  const montoFormateado = formatMonto(data.monto);
+
+  const linkPagoHtml = data.link_pago
+    ? `<p style="margin-top:24px"><a href="${data.link_pago}" style="background:#2563eb;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">Pagar ahora</a></p>`
+    : '';
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Nuevo vencimiento: ${data.tipo}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#1e293b">Nuevo vencimiento asignado</h2>
+          <p>Hola <strong>${data.nombre}</strong>,</p>
+          <p>Tu contador registró un nuevo vencimiento para tu cuenta:</p>
+          <table style="border-collapse:collapse;width:100%;margin:16px 0">
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600;width:40%">Tipo</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${data.tipo}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600">Monto</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${montoFormateado}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600">Vencimiento</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${fechaFormateada}</td>
+            </tr>
+          </table>
+          ${linkPagoHtml}
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendNuevoImpuesto OK → ${to} | ${data.tipo}`);
+  } catch (err) {
+    console.error(`[email] sendNuevoImpuesto FAIL → ${to} | ${data.tipo}`, err);
+    throw err;
+  }
 }
 
 export async function sendRecordatorio(
   to: string,
-  data: { nombre: string; tipo: string; fecha_vencimiento: string }
-) {
-  await resend.emails.send({
-    from: FROM,
-    to,
-    subject: `Recordatorio: ${data.tipo} vence en 3 días`,
-    html: `
-      <h2>Recordatorio de vencimiento</h2>
-      <p>Hola ${data.nombre},</p>
-      <p>Tu impuesto <strong>${data.tipo}</strong> vence el <strong>${data.fecha_vencimiento}</strong>.</p>
-      <p>Recordá realizar el pago a tiempo.</p>
-    `,
-  });
+  data: {
+    nombre: string;
+    tipo: string;
+    fecha_vencimiento: string;
+  }
+): Promise<void> {
+  const fechaFormateada = formatFecha(data.fecha_vencimiento);
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Recordatorio: ${data.tipo} vence el ${fechaFormateada}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#d97706">⏰ Recordatorio de vencimiento</h2>
+          <p>Hola <strong>${data.nombre}</strong>,</p>
+          <p>Te recordamos que tu impuesto <strong>${data.tipo}</strong> vence en <strong>3 días</strong>:</p>
+          <p style="font-size:20px;font-weight:700;color:#dc2626">📅 ${fechaFormateada}</p>
+          <p>Asegurate de tener el pago listo antes de esa fecha para evitar recargos.</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendRecordatorio OK → ${to} | ${data.tipo} | vence ${fechaFormateada}`);
+  } catch (err) {
+    console.error(`[email] sendRecordatorio FAIL → ${to} | ${data.tipo}`, err);
+    throw err;
+  }
 }
 
 export async function sendVencido(
   to: string[],
-  data: { nombre: string; tipo: string }
-) {
-  await resend.emails.send({
-    from: FROM,
-    to,
-    subject: `VENCIDO: ${data.tipo}`,
-    html: `
-      <h2>Impuesto vencido</h2>
-      <p>El impuesto <strong>${data.tipo}</strong> del cliente <strong>${data.nombre}</strong> ha vencido.</p>
-      <p>Por favor gestionar el pago a la brevedad.</p>
-    `,
-  });
+  data: {
+    nombre_cliente: string;
+    tipo: string;
+  }
+): Promise<void> {
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `⚠️ Vencimiento no pagado: ${data.tipo}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#dc2626">⚠️ Vencimiento no pagado</h2>
+          <p>El impuesto <strong>${data.tipo}</strong> del cliente <strong>${data.nombre_cliente}</strong> venció sin registrar pago.</p>
+          <p>Por favor gestionar el pago a la brevedad para evitar intereses y penalidades.</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendVencido OK → [${to.join(', ')}] | ${data.tipo}`);
+  } catch (err) {
+    console.error(`[email] sendVencido FAIL → [${to.join(', ')}] | ${data.tipo}`, err);
+    throw err;
+  }
 }
