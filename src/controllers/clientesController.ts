@@ -3,12 +3,7 @@ import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { User } from '../types';
 
-type UserRow = User & { password_hash: string };
-
-function stripHash(user: UserRow): User {
-  const { password_hash: _, ...safe } = user;
-  return safe as User;
-}
+const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
 
 export async function crearCliente(req: Request, res: Response): Promise<void> {
   const { nombre, email, password, cuit, telefono } = req.body as {
@@ -21,6 +16,11 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
 
   if (!nombre || !email || !password) {
     res.status(400).json({ error: 'nombre, email y password son requeridos' });
+    return;
+  }
+
+  if (password.length < 8) {
+    res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
     return;
   }
 
@@ -57,7 +57,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
         estudio_id,
         activo: true,
       })
-      .select('*')
+      .select(USER_FIELDS)
       .single();
 
     if (error || !data) {
@@ -65,7 +65,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    res.status(201).json(stripHash(data as UserRow));
+    res.status(201).json(data as User);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -77,7 +77,7 @@ export async function listarClientes(req: Request, res: Response): Promise<void>
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('*')
+      .select(USER_FIELDS)
       .eq('role', 'cliente')
       .eq('estudio_id', estudio_id)
       .order('nombre', { ascending: true });
@@ -87,7 +87,7 @@ export async function listarClientes(req: Request, res: Response): Promise<void>
       return;
     }
 
-    res.json((data as UserRow[]).map(stripHash));
+    res.json(data as User[]);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -100,7 +100,7 @@ export async function obtenerCliente(req: Request, res: Response): Promise<void>
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('*')
+      .select(USER_FIELDS)
       .eq('id', id)
       .eq('role', 'cliente')
       .eq('estudio_id', estudio_id)
@@ -116,7 +116,7 @@ export async function obtenerCliente(req: Request, res: Response): Promise<void>
       return;
     }
 
-    res.json(stripHash(data as UserRow));
+    res.json(data as User);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -180,7 +180,7 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
       .from('users')
       .update(updates)
       .eq('id', id)
-      .select('*')
+      .select(USER_FIELDS)
       .single();
 
     if (error || !data) {
@@ -188,7 +188,7 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
       return;
     }
 
-    res.json(stripHash(data as UserRow));
+    res.json(data as User);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }

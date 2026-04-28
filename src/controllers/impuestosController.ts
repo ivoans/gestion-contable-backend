@@ -18,8 +18,23 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
     return;
   }
 
+  if (tipo.length > 100) {
+    res.status(400).json({ error: 'El tipo no puede superar 100 caracteres' });
+    return;
+  }
+
+  if (typeof monto !== 'number' || !Number.isFinite(monto) || monto <= 0) {
+    res.status(400).json({ error: 'monto debe ser un número positivo' });
+    return;
+  }
+
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento) || isNaN(Date.parse(fecha_vencimiento))) {
     res.status(400).json({ error: 'Fecha de vencimiento debe tener formato YYYY-MM-DD' });
+    return;
+  }
+
+  if (link_pago !== undefined && !/^https:\/\//i.test(link_pago)) {
+    res.status(400).json({ error: 'link_pago debe ser una URL HTTPS válida' });
     return;
   }
 
@@ -100,9 +115,16 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
   }
 }
 
+const ESTADOS_VALIDOS: EstadoImpuesto[] = ['pendiente', 'vencido', 'pagado'];
+
 export async function listarImpuestos(req: Request, res: Response): Promise<void> {
   const estudio_id = req.user!.estudio_id;
   const { cliente_id, estado } = req.query as { cliente_id?: string; estado?: string };
+
+  if (estado && !ESTADOS_VALIDOS.includes(estado as EstadoImpuesto)) {
+    res.status(400).json({ error: 'estado debe ser pendiente, vencido o pagado' });
+    return;
+  }
 
   try {
     let query = supabase
@@ -112,7 +134,7 @@ export async function listarImpuestos(req: Request, res: Response): Promise<void
       .order('fecha_vencimiento', { ascending: true });
 
     if (cliente_id) query = query.eq('cliente_id', cliente_id);
-    if (estado) query = query.eq('estado', estado);
+    if (estado) query = query.eq('estado', estado as EstadoImpuesto);
 
     const { data, error } = await query;
 
@@ -166,6 +188,33 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
     link_pago?: string;
   };
 
+  if (fecha_vencimiento !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento) || isNaN(Date.parse(fecha_vencimiento)))) {
+    res.status(400).json({ error: 'Fecha de vencimiento debe tener formato YYYY-MM-DD' });
+    return;
+  }
+
+  if (monto !== undefined && (typeof monto !== 'number' || !Number.isFinite(monto) || monto <= 0)) {
+    res.status(400).json({ error: 'monto debe ser un número positivo' });
+    return;
+  }
+
+  if (link_pago !== undefined && !/^https:\/\//i.test(link_pago)) {
+    res.status(400).json({ error: 'link_pago debe ser una URL HTTPS válida' });
+    return;
+  }
+
+  const updates: Partial<Record<string, unknown>> = {};
+  if (tipo !== undefined) updates.tipo = tipo;
+  if (monto !== undefined) updates.monto = monto;
+  if (fecha_vencimiento !== undefined) updates.fecha_vencimiento = fecha_vencimiento;
+  if (descripcion !== undefined) updates.descripcion = descripcion;
+  if (link_pago !== undefined) updates.link_pago = link_pago;
+
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No se enviaron campos para actualizar' });
+    return;
+  }
+
   try {
     const { data: existing, error: findError } = await supabase
       .from('impuestos')
@@ -173,11 +222,6 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
       .eq('id', id)
       .eq('estudio_id', estudio_id)
       .maybeSingle();
-
-    if (fecha_vencimiento !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento) || isNaN(Date.parse(fecha_vencimiento)))) {
-    res.status(400).json({ error: 'Fecha de vencimiento debe tener formato YYYY-MM-DD' });
-    return;
-  }
 
     if (findError) {
       res.status(500).json({ error: 'Error interno del servidor' });
@@ -193,13 +237,6 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
       res.status(400).json({ error: 'No se puede editar un impuesto pagado' });
       return;
     }
-
-    const updates: Partial<Record<string, unknown>> = {};
-    if (tipo !== undefined) updates.tipo = tipo;
-    if (monto !== undefined) updates.monto = monto;
-    if (fecha_vencimiento !== undefined) updates.fecha_vencimiento = fecha_vencimiento;
-    if (descripcion !== undefined) updates.descripcion = descripcion;
-    if (link_pago !== undefined) updates.link_pago = link_pago;
 
     const { data, error } = await supabase
       .from('impuestos')

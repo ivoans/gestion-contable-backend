@@ -18,6 +18,11 @@ export async function crearContador(req: Request, res: Response): Promise<void> 
     return;
   }
 
+  if (password.length < 8) {
+    res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    return;
+  }
+
   try {
     const { data: existing } = await supabase
       .from('users')
@@ -140,6 +145,11 @@ export async function actualizarContador(req: Request, res: Response): Promise<v
     const updates: Partial<Pick<User, 'nombre' | 'email'>> = {};
     if (nombre !== undefined) updates.nombre = nombre;
     if (email !== undefined) updates.email = email;
+
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: 'No se enviaron campos para actualizar' });
+      return;
+    }
 
     const { data, error } = await supabase
       .from('users')
