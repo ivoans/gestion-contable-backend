@@ -29,7 +29,7 @@ type ImpuestoRecordatorio = {
   cliente: { email: string; nombre: string };
 };
 
-async function procesarVencidos(): Promise<void> {
+export async function procesarVencidos(): Promise<void> {
   const ts = new Date().toISOString();
   console.log(`[cron:vencidos] START ${ts}`);
 
@@ -54,6 +54,15 @@ async function procesarVencidos(): Promise<void> {
   let procesados = 0;
 
   for (const impuesto of vencidos as unknown as ImpuestoVencido[]) {
+    const { data: notifExistente } = await supabase
+      .from('notificaciones')
+      .select('id')
+      .eq('impuesto_id', impuesto.id)
+      .eq('tipo', 'vencido')
+      .maybeSingle();
+
+    if (notifExistente) continue;
+
     const { error: updateError } = await supabase
       .from('impuestos')
       .update({ estado: 'vencido' })
@@ -63,15 +72,6 @@ async function procesarVencidos(): Promise<void> {
       console.error(`[cron:vencidos] Error actualizando ${impuesto.id}:`, updateError.message);
       continue;
     }
-
-    const { data: notifExistente } = await supabase
-      .from('notificaciones')
-      .select('id')
-      .eq('impuesto_id', impuesto.id)
-      .eq('tipo', 'vencido')
-      .maybeSingle();
-
-    if (notifExistente) continue;
 
     try {
       await sendVencido(
@@ -93,7 +93,7 @@ async function procesarVencidos(): Promise<void> {
   console.log(`[cron:vencidos] Procesados ${procesados}/${vencidos.length}. END ${new Date().toISOString()}`);
 }
 
-async function procesarRecordatorios(): Promise<void> {
+export async function procesarRecordatorios(): Promise<void> {
   const ts = new Date().toISOString();
   console.log(`[cron:recordatorios] START ${ts}`);
 

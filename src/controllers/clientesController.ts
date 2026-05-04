@@ -132,6 +132,17 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
     telefono?: string;
   };
 
+  const updates: Partial<Record<string, unknown>> = {};
+  if (nombre !== undefined) updates.nombre = nombre;
+  if (email !== undefined) updates.email = email;
+  if (cuit !== undefined) updates.cuit = cuit;
+  if (telefono !== undefined) updates.telefono = telefono;
+
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No se enviaron campos para actualizar' });
+    return;
+  }
+
   try {
     const { data: existing, error: findError } = await supabase
       .from('users')
@@ -169,12 +180,6 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
         return;
       }
     }
-
-    const updates: Partial<Record<string, unknown>> = {};
-    if (nombre !== undefined) updates.nombre = nombre;
-    if (email !== undefined) updates.email = email;
-    if (cuit !== undefined) updates.cuit = cuit;
-    if (telefono !== undefined) updates.telefono = telefono;
 
     const { data, error } = await supabase
       .from('users')

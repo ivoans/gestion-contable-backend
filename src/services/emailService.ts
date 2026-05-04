@@ -4,6 +4,10 @@ const resend = new Resend(process.env.RESEND_API_KEY!);
 
 const FROM = process.env.EMAIL_FROM ?? 'Sistema Contable <notificaciones@tudominio.com>';
 
+function emailsEnabled(): boolean {
+  return process.env.EMAILS_ENABLED === 'true';
+}
+
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -37,6 +41,11 @@ export async function sendNuevoImpuesto(
     link_pago?: string;
   }
 ): Promise<void> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendNuevoImpuesto SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
+    return;
+  }
+
   const fechaFormateada = formatFecha(data.fecha_vencimiento);
   const montoFormateado = formatMonto(data.monto);
   const nombre = escapeHtml(data.nombre);
@@ -91,6 +100,11 @@ export async function sendRecordatorio(
     fecha_vencimiento: string;
   }
 ): Promise<void> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendRecordatorio SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
+    return;
+  }
+
   const fechaFormateada = formatFecha(data.fecha_vencimiento);
   const nombre = escapeHtml(data.nombre);
   const tipo = escapeHtml(data.tipo);
@@ -125,6 +139,11 @@ export async function sendVencido(
     tipo: string;
   }
 ): Promise<void> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendVencido SKIP (EMAILS_ENABLED!=true) → [${to.join(', ')}] | ${data.tipo}`);
+    return;
+  }
+
   const tipo = escapeHtml(data.tipo);
   const nombreCliente = escapeHtml(data.nombre_cliente);
 

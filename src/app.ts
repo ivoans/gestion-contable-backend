@@ -5,6 +5,7 @@ import authRouter from './routes/auth';
 import adminRouter from './routes/admin';
 import clientesRouter from './routes/clientes';
 import impuestosRouter from './routes/impuestos';
+import internalRouter from './routes/internal';
 
 export function createApp(): Express {
   const app = express();
@@ -34,6 +35,7 @@ export function createApp(): Express {
   app.use('/api/admin', adminRouter);
   app.use('/api/clientes', clientesRouter);
   app.use('/api/impuestos', impuestosRouter);
+  app.use('/api/internal', internalRouter);
 
   return app;
 }
