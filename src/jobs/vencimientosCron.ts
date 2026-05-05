@@ -18,7 +18,6 @@ type ImpuestoVencido = {
   creado_por: string;
   tipo: string;
   cliente: { email: string; nombre: string };
-  contador: { email: string };
 };
 
 type ImpuestoRecordatorio = {
@@ -37,7 +36,7 @@ export async function procesarVencidos(): Promise<void> {
 
   const { data: vencidos, error } = await supabase
     .from('impuestos')
-    .select('id, cliente_id, creado_por, tipo, cliente:users!cliente_id(email, nombre), contador:users!creado_por(email)')
+    .select('id, cliente_id, creado_por, tipo, cliente:users!cliente_id(email, nombre)')
     .eq('estado', 'pendiente')
     .lt('fecha_vencimiento', today);
 
@@ -75,14 +74,16 @@ export async function procesarVencidos(): Promise<void> {
 
     try {
       await sendVencido(
-        [impuesto.cliente.email, impuesto.contador.email],
+        impuesto.cliente.email,
         { nombre_cliente: impuesto.cliente.nombre, tipo: impuesto.tipo }
       );
 
-      await supabase.from('notificaciones').insert([
-        { impuesto_id: impuesto.id, user_id: impuesto.cliente_id, tipo: 'vencido', canal: 'email' },
-        { impuesto_id: impuesto.id, user_id: impuesto.creado_por, tipo: 'vencido', canal: 'email' },
-      ]);
+      await supabase.from('notificaciones').insert({
+        impuesto_id: impuesto.id,
+        user_id: impuesto.cliente_id,
+        tipo: 'vencido',
+        canal: 'email',
+      });
 
       procesados++;
     } catch (emailErr) {
