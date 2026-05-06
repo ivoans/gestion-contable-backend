@@ -133,14 +133,14 @@ export async function sendRecordatorio(
 }
 
 export async function sendVencido(
-  to: string[],
+  to: string,
   data: {
     nombre_cliente: string;
     tipo: string;
   }
 ): Promise<void> {
   if (!emailsEnabled()) {
-    console.log(`[email] sendVencido SKIP (EMAILS_ENABLED!=true) → [${to.join(', ')}] | ${data.tipo}`);
+    console.log(`[email] sendVencido SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
     return;
   }
 
@@ -161,9 +161,9 @@ export async function sendVencido(
         </div>
       `,
     });
-    console.log(`[email] sendVencido OK → [${to.join(', ')}] | ${tipo}`);
+    console.log(`[email] sendVencido OK → ${to} | ${tipo}`);
   } catch (err) {
-    console.error(`[email] sendVencido FAIL → [${to.join(', ')}] | ${data.tipo}`, err);
+    console.error(`[email] sendVencido FAIL → ${to} | ${data.tipo}`, err);
     throw err;
   }
 }
