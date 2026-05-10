@@ -243,3 +243,50 @@ export async function actualizarEstadoCliente(req: Request, res: Response): Prom
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 }
+
+export async function cambiarPasswordCliente(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const estudio_id = req.user!.estudio_id;
+  const { password } = req.body as { password?: string };
+
+  if (typeof password !== 'string' || password.length < 8) {
+    res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    return;
+  }
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', id)
+      .eq('role', 'cliente')
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    if (!existing) {
+      res.status(404).json({ error: 'Cliente no encontrado' });
+      return;
+    }
+
+    const password_hash = await bcrypt.hash(password, 12);
+
+    const { error } = await supabase
+      .from('users')
+      .update({ password_hash })
+      .eq('id', id);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.status(204).send();
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}

@@ -268,4 +268,107 @@ describe('clientes', () => {
       expect(sb.calls[1].payload).toEqual({ activo: false });
     });
   });
+
+  describe('PATCH /api/clientes/:id/password', () => {
+    it('401 sin token', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(401);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', adminAuth)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(403);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', clienteAuth)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(403);
+    });
+
+    it('400 si falta password', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
+    it('400 si password < 8', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', authA)
+        .send({ password: '1234567' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
+    it('404 si cliente pertenece a otro estudio', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', authB)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
+    it('404 si id corresponde a admin (filtro role=cliente)', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch(`/api/clientes/${admin.id}/password`)
+        .set('Authorization', authA)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
+    it('404 si id corresponde a otro contador (filtro role=cliente)', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch(`/api/clientes/${contadorB.id}/password`)
+        .set('Authorization', authA)
+        .send({ password: '12345678' });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
+    it('204 en éxito + update con hash bcrypt (no plaintext)', async () => {
+      sb.queue([
+        { table: 'users', result: { data: { id: cliente.id }, error: null } },
+        { table: 'users', result: { data: null, error: null } },
+      ]);
+      bcryptMock.hash.mockResolvedValue('hashed-pw');
+
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}/password`)
+        .set('Authorization', authA)
+        .send({ password: 'plaintext-secret' });
+
+      expect(res.status).toBe(204);
+      expect(res.body).toEqual({});
+      expect(bcryptMock.hash).toHaveBeenCalledWith('plaintext-secret', 12);
+
+      const updateCall = sb.calls[1];
+      expect(updateCall.op).toBe('update');
+      expect(updateCall.payload).toEqual({ password_hash: 'hashed-pw' });
+      expect(updateCall.payload).not.toHaveProperty('password');
+      expect(JSON.stringify(updateCall.payload)).not.toContain('plaintext-secret');
+      expect(updateCall.filters).toContainEqual(['eq', 'id', cliente.id]);
+    });
+  });
 });
