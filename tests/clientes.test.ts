@@ -73,6 +73,21 @@ describe('clientes', () => {
       expect(res.status).toBe(400);
     });
 
+    it.each([
+      ['no-arroba'],
+      ['@sinusuario.com'],
+      ['espacios@dom .com'],
+    ])('400 si email formato inválido: %s', async (badEmail) => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({ nombre: 'X', email: badEmail, password: '12345678' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'Email inválido' });
+      expect(sb.calls).toHaveLength(0);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
     it('409 si email ya existe', async () => {
       sb.queue([{ table: 'users', result: { data: { id: 'otro' }, error: null } }]);
       const res = await request(app)
@@ -205,6 +220,16 @@ describe('clientes', () => {
         .send({ nombre: 'Hack' });
       expect(res.status).toBe(404);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+    });
+
+    it('400 si email formato inválido en update (no llega a DB)', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ email: 'no-arroba' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'Email inválido' });
+      expect(sb.calls).toHaveLength(0);
     });
 
     it('409 si email ya tomado por otro user', async () => {

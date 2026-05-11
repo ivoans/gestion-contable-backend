@@ -68,6 +68,20 @@ describe('admin', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
+    it.each([
+      ['no-arroba'],
+      ['@sinusuario.com'],
+      ['espacios@dom .com'],
+    ])('400 si email formato inválido: %s', async (badEmail) => {
+      const res = await request(app)
+        .post('/api/admin/contadores')
+        .set('Authorization', adminAuth)
+        .send({ nombre: 'X', email: badEmail, password: '12345678', estudio_id: 'e1' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'Email inválido' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
     it('400 si password < 8', async () => {
       const res = await request(app)
         .post('/api/admin/contadores')
@@ -205,6 +219,16 @@ describe('admin', () => {
         .send({});
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/No se enviaron campos/);
+    });
+
+    it('400 si email formato inválido en update (no llega a DB)', async () => {
+      const res = await request(app)
+        .patch(`/api/admin/contadores/${contador.id}`)
+        .set('Authorization', adminAuth)
+        .send({ email: '@sinusuario.com' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'Email inválido' });
+      expect(sb.calls).toHaveLength(0);
     });
 
     it('409 si email ya tomado por otro user', async () => {

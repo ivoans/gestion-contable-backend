@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { User } from '../types';
+import { isValidEmail } from '../utils/validators';
 
 const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
 
@@ -16,6 +17,11 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
 
   if (!nombre || !email || !password) {
     res.status(400).json({ error: 'nombre, email y password son requeridos' });
+    return;
+  }
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: 'Email inválido' });
     return;
   }
 
@@ -131,6 +137,11 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
     cuit?: string;
     telefono?: string;
   };
+
+  if (email !== undefined && !isValidEmail(email)) {
+    res.status(400).json({ error: 'Email inválido' });
+    return;
+  }
 
   const updates: Partial<Record<string, unknown>> = {};
   if (nombre !== undefined) updates.nombre = nombre;

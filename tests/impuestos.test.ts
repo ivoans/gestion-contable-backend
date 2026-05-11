@@ -505,6 +505,26 @@ describe('impuestos', () => {
       expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteOtro.id]);
       expect(sb.calls[0].filters).not.toContainEqual(['eq', 'cliente_id', clienteA.id]);
     });
+
+    it('FIX 3: query filtra por estudio_id del JWT además de cliente_id', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: [], error: null } }]);
+      await request(app)
+        .get('/api/impuestos/mis-impuestos')
+        .set('Authorization', clienteAuth);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', clienteA.estudio_id]);
+    });
+
+    it('FIX 3: si DB devuelve [] (estudio no matchea), respuesta agrupada vacía', async () => {
+      // Simula: existen impuestos con cliente_id correcto pero estudio_id distinto al JWT.
+      // El filter estudio_id del query los excluye → DB devuelve [].
+      sb.queue([{ table: 'impuestos', result: { data: [], error: null } }]);
+      const res = await request(app)
+        .get('/api/impuestos/mis-impuestos')
+        .set('Authorization', clienteAuth);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ pendientes: [], vencidos: [], pagados: [] });
+    });
   });
 
   describe('GET /api/impuestos/mis-impuestos/:id', () => {
@@ -532,6 +552,18 @@ describe('impuestos', () => {
         .set('Authorization', clienteAuth);
       expect(res.status).toBe(200);
       expect(res.body).toEqual(imp);
+    });
+
+    it('FIX 3: 404 si impuesto pertenece a otro estudio (filter por estudio_id del JWT)', async () => {
+      // DB devuelve null porque el filtro estudio_id NO matchea aunque cliente_id e id sí.
+      sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .get('/api/impuestos/mis-impuestos/cualquier-id')
+        .set('Authorization', clienteAuth);
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'id', 'cualquier-id']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', clienteA.estudio_id]);
     });
   });
 });

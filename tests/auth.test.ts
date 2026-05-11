@@ -51,6 +51,15 @@ describe('POST /api/auth/login', () => {
     expect(res.status).toBe(400);
   });
 
+  it('400 si email tiene formato inválido (no llega a DB)', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'no-arroba', password: '12345678' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'Email inválido' });
+    expect(sb.calls).toHaveLength(0);
+  });
+
   it('401 si user no existe', async () => {
     sb.queue([{ table: 'users', result: { data: null, error: null } }]);
     const res = await request(app)
@@ -70,7 +79,7 @@ describe('POST /api/auth/login', () => {
     expect(res.body).toEqual({ error: 'Error interno del servidor' });
   });
 
-  it('403 si user inactivo', async () => {
+  it('401 si user inactivo', async () => {
     const user = makeUser({ activo: false });
     sb.queue([
       { table: 'users', result: { data: { ...user, password_hash: 'h' }, error: null } },
@@ -78,10 +87,51 @@ describe('POST /api/auth/login', () => {
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: user.email, password: 'x' });
-    expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: 'Usuario inactivo' });
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'Credenciales inválidas' });
     // Inactivo corta antes de comparar password.
     expect(bcryptMock.compare).not.toHaveBeenCalled();
+  });
+
+  it('respuesta idéntica para email inexistente, password mala, user inactivo (sin enumeration)', async () => {
+    // Caso 1: email no existe → 401 'Credenciales inválidas'
+    sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+    const r1 = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'nadie@x.com', password: '12345678' });
+
+    sb.reset();
+    bcryptMock.compare.mockReset();
+
+    // Caso 2: password mala → 401 'Credenciales inválidas'
+    const u = makeUser();
+    sb.queue([
+      { table: 'users', result: { data: { ...u, password_hash: 'h' }, error: null } },
+    ]);
+    bcryptMock.compare.mockResolvedValue(false);
+    const r2 = await request(app)
+      .post('/api/auth/login')
+      .send({ email: u.email, password: 'wrong' });
+
+    sb.reset();
+    bcryptMock.compare.mockReset();
+
+    // Caso 3: user inactivo → 401 'Credenciales inválidas' (antes era 403 'Usuario inactivo')
+    const u2 = makeUser({ activo: false });
+    sb.queue([
+      { table: 'users', result: { data: { ...u2, password_hash: 'h' }, error: null } },
+    ]);
+    const r3 = await request(app)
+      .post('/api/auth/login')
+      .send({ email: u2.email, password: 'whatever' });
+
+    // Mismo status y body en los tres casos → no se puede distinguir desde el cliente.
+    expect(r1.status).toBe(401);
+    expect(r2.status).toBe(401);
+    expect(r3.status).toBe(401);
+    expect(r1.body).toEqual({ error: 'Credenciales inválidas' });
+    expect(r2.body).toEqual({ error: 'Credenciales inválidas' });
+    expect(r3.body).toEqual({ error: 'Credenciales inválidas' });
   });
 
   it('401 si password incorrecta', async () => {

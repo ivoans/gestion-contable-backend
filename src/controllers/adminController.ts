@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { User } from '../types';
+import { isValidEmail } from '../utils/validators';
 
 const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
 
@@ -15,6 +16,11 @@ export async function crearContador(req: Request, res: Response): Promise<void> 
 
   if (!nombre || !email || !password || !estudio_id) {
     res.status(400).json({ error: 'nombre, email, password y estudio_id son requeridos' });
+    return;
+  }
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: 'Email inválido' });
     return;
   }
 
@@ -114,6 +120,11 @@ export async function obtenerContador(req: Request, res: Response): Promise<void
 export async function actualizarContador(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const { nombre, email } = req.body as { nombre?: string; email?: string };
+
+  if (email !== undefined && !isValidEmail(email)) {
+    res.status(400).json({ error: 'Email inválido' });
+    return;
+  }
 
   try {
     const { data: existing } = await supabase

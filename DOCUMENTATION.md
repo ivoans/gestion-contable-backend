@@ -37,6 +37,9 @@ Scripts disponibles (`package.json`):
 - `pnpm dev` — `nodemon` + `ts-node` (desarrollo)
 - `pnpm build` — compila a `dist/`
 - `pnpm start` — corre `dist/index.js` (producción)
+- `pnpm test` — corre Vitest en modo `run`
+- `pnpm test:watch` — Vitest en watch
+- `pnpm test:cov` — Vitest + coverage v8
 
 ---
 
@@ -44,11 +47,14 @@ Scripts disponibles (`package.json`):
 
 ```
 src/
-├── index.ts                       # Bootstrap del server (Express + cron)
+├── app.ts                         # createApp(): construye Express + middlewares + routers
+├── index.ts                       # Bootstrap: valida env, app.listen, initCronJobs
 ├── lib/
 │   └── supabase.ts                # Singleton del cliente Supabase
 ├── types/
 │   └── index.ts                   # Tipos compartidos (User, Impuesto, JwtPayload, ...)
+├── utils/
+│   └── validators.ts              # isValidEmail() — validación de formato de email
 ├── middleware/
 │   ├── auth.ts                    # authenticate (JWT)
 │   ├── roles.ts                   # requireRole(...roles)
@@ -57,11 +63,12 @@ src/
 │   ├── auth.ts                    # /api/auth
 │   ├── admin.ts                   # /api/admin/contadores
 │   ├── clientes.ts                # /api/clientes
-│   └── impuestos.ts               # /api/impuestos
+│   ├── impuestos.ts               # /api/impuestos
+│   └── internal.ts                # /api/internal (cron trigger con shared secret)
 ├── controllers/
 │   ├── authController.ts          # login()
 │   ├── adminController.ts         # CRUD contadores
-│   ├── clientesController.ts      # CRUD clientes
+│   ├── clientesController.ts      # CRUD clientes + cambio de password
 │   └── impuestosController.ts     # CRUD impuestos + endpoints de cliente
 ├── services/
 │   └── emailService.ts            # sendNuevoImpuesto / sendRecordatorio / sendVencido
@@ -69,6 +76,18 @@ src/
 │   └── vencimientosCron.ts        # Crons diarios: vencidos + recordatorios 3 días
 └── database/
     └── schema.sql                 # DDL completo (tablas, índices, triggers, enums)
+
+tests/
+├── setup.ts                       # env vars de test
+├── app.test.ts                    # trust proxy + bootstrap
+├── auth.test.ts                   # POST /api/auth/login
+├── admin.test.ts                  # /api/admin/*
+├── clientes.test.ts               # /api/clientes/*
+├── impuestos.test.ts              # /api/impuestos/*
+├── helpers/                       # supabaseMock, factories, auth
+├── middleware/                    # tests de auth + roles middleware
+└── utils/
+    └── validators.test.ts         # isValidEmail
 ```
 
 ---
@@ -86,6 +105,8 @@ Cargadas en `src/index.ts` con `dotenv/config`. Si falta alguna, el servidor **n
 | `SUPABASE_SERVICE_KEY` | Service Role Key (sí, bypasea RLS — cuidar) |
 | `RESEND_API_KEY` | API key de Resend para email |
 
+La validación de env se saltea cuando `NODE_ENV === 'test'`.
+
 ### Opcionales
 
 | Variable | Default | Uso |
@@ -93,28 +114,40 @@ Cargadas en `src/index.ts` con `dotenv/config`. Si falta alguna, el servidor **n
 | `PORT` | `3000` | Puerto HTTP |
 | `ALLOWED_ORIGINS` | `[]` (CORS bloquea todo) | CSV de orígenes permitidos por CORS |
 | `EMAIL_FROM` | `Sistema Contable <notificaciones@tudominio.com>` | Remitente de los emails |
+| `EMAILS_ENABLED` | `false` salvo `'true'` | Si no es `'true'`, los `sendXxx` loguean y retornan sin pegarle a Resend (útil en dev/test) |
+| `CRON_SECRET` | (sin default) | Shared secret para `POST /api/internal/run-cron`. Si no está seteado, ese endpoint responde `503` |
 
 ⚠️ Si `ALLOWED_ORIGINS` no se setea, **ningún navegador con `Origin` podrá pegarle al backend**. Requests sin header `Origin` (curl, server-to-server) sí pasan.
 
 ---
 
-## 5. Bootstrap (`src/index.ts`)
+## 5. Bootstrap
 
-Orden exacto del arranque:
+Dividido en dos archivos:
 
-1. `import 'dotenv/config'` — carga `.env`.
-2. Validación de env requeridas — si falta una, throw.
-3. Imports de routers + cron job.
-4. Construcción del `app` Express.
-5. CORS con allowlist desde `ALLOWED_ORIGINS`.
-6. `express.json()` para parsear bodies.
-7. `GET /health` → `{ status: 'ok', timestamp }`.
-8. Montaje de routers:
+- **`src/app.ts`** — exporta `createApp()`. Sin side effects (puede importarse en tests sin abrir puertos ni arrancar crons). Es lo que se mockea / monta en supertest.
+- **`src/index.ts`** — carga `.env`, valida vars, llama `createApp()`, abre el puerto y arranca el cron.
+
+### `createApp()` — orden exacto
+
+1. `express()`.
+2. `app.set('trust proxy', 1)` — necesario detrás de Render/Vercel/Cloudflare para que `req.ip` y `express-rate-limit` vean la IP real del cliente, no la del proxy.
+3. CORS con allowlist desde `ALLOWED_ORIGINS`.
+4. `express.json()`.
+5. `GET /health` → `{ status: 'ok', timestamp }`.
+6. Montaje de routers:
    - `/api/auth` → `authRouter`
    - `/api/admin` → `adminRouter`
    - `/api/clientes` → `clientesRouter`
    - `/api/impuestos` → `impuestosRouter`
-9. `app.listen(PORT)` y luego `initCronJobs()` (2 jobs a las 08:00 ART).
+   - `/api/internal` → `internalRouter` (cron trigger)
+
+### `index.ts`
+
+1. `import 'dotenv/config'`.
+2. Si `NODE_ENV !== 'test'`, valida que existan todas las env vars requeridas — si falta una, throw.
+3. `createApp()` + `app.listen(PORT)`.
+4. `initCronJobs()` (2 jobs a las 08:00 ART).
 
 ---
 
@@ -197,7 +230,11 @@ Trigger `trg_impuestos_updated_at` (BEFORE UPDATE): setea `updated_at = NOW()`.
 
 ### 7.1 JWT
 
-- Emitido en `POST /api/auth/login` con `expiresIn: '8h'`.
+- Emitido en `POST /api/auth/login`.
+- TTL configurable por request:
+  - Sin `remember` o `remember: false` → `expiresIn: '8h'`.
+  - `remember: true` → `expiresIn: '10d'` (sesión persistente).
+- La respuesta del login incluye `expires_at` (ISO string) para que el frontend conozca el momento exacto de expiración.
 - Payload (`JwtPayload`): `{ id, email, role, estudio_id }`.
 - Validado por `authenticate` (`src/middleware/auth.ts`):
   - Lee header `Authorization: Bearer <token>`.
@@ -206,6 +243,8 @@ Trigger `trg_impuestos_updated_at` (BEFORE UPDATE): setea `updated_at = NOW()`.
   - En éxito: setea `req.user = payload` y llama `next()`.
 
 `req.user` está tipado globalmente vía `declare global { namespace Express { interface Request { user?: JwtPayload } } }`.
+
+> ⚠️ JWT stateless: el token sigue válido hasta su `exp` aunque el usuario sea desactivado o cambie su password. No hay revocación server-side.
 
 ### 7.2 Autorización por rol
 
@@ -217,9 +256,27 @@ Trigger `trg_impuestos_updated_at` (BEFORE UPDATE): setea `updated_at = NOW()`.
 
 El backend filtra **siempre** por `estudio_id` tomado de `req.user!.estudio_id` en queries de contador y cliente. No depende de RLS de Supabase — usa la Service Key, que bypasea RLS. **Toda nueva query a `users` o `impuestos` debe filtrar por `estudio_id` cuando el rol no es `admin`**, o se rompe el aislamiento entre estudios.
 
-### 7.4 Rate limit
+Esto aplica también a los endpoints del cliente final (`/mis-impuestos`, `/mis-impuestos/:id`): además del `cliente_id` del JWT, las queries filtran por `estudio_id` como defensa en profundidad.
 
-`loginLimiter` (`src/middleware/rateLimits.ts`): 10 requests / 15 min por IP. Solo aplicado a `POST /api/auth/login`.
+### 7.4 Rate limit y `trust proxy`
+
+- `loginLimiter` (`src/middleware/rateLimits.ts`): 10 requests / 15 min por IP. Solo aplicado a `POST /api/auth/login`.
+- `createApp()` setea `app.set('trust proxy', 1)`. Sin esto, detrás de Render/Vercel/Cloudflare `req.ip` toma la IP del proxy y **todos los clientes comparten el mismo bucket de rate-limit** (DoS trivial del login). Con `trust proxy=1`, Express toma el último valor del header `X-Forwarded-For`, que corresponde al cliente real.
+
+### 7.5 Anti-enumeration en login
+
+El endpoint de login devuelve **el mismo status y body** (`401 { error: 'Credenciales inválidas' }`) en los tres casos de credencial inválida: email inexistente, password incorrecta, usuario inactivo. Un atacante no puede distinguirlos desde la respuesta para enumerar emails registrados.
+
+Errores de validación previa (campos faltantes, formato de email inválido) sí devuelven `400` — son input validation, no revelan información del backend.
+
+### 7.6 Validación de formato de email
+
+`isValidEmail()` en `src/utils/validators.ts` valida:
+- Es string.
+- Longitud ≤ 254 chars.
+- Regex `^[^\s@]+@[^\s@]+\.[^\s@]+$` (un `@`, al menos un `.` en domain, sin whitespace).
+
+Se aplica en todos los endpoints que aceptan email del usuario: `login`, `POST/PATCH /api/admin/contadores`, `POST/PATCH /api/clientes`. Si el formato es inválido → `400 { error: 'Email inválido' }` antes de tocar DB o hashear password.
 
 ---
 
@@ -241,17 +298,22 @@ Convenciones:
 ### 8.2 `/api/auth`
 
 #### `POST /api/auth/login`
-- Auth: ninguna. Rate-limit: 10/15 min.
-- Body: `email*`, `password*`.
-- Flujo: busca usuario por email → si `activo=false` → 403 → compara bcrypt → firma JWT 8h.
+- Auth: ninguna. Rate-limit: 10/15 min (por IP real gracias a `trust proxy`).
+- Body: `email*`, `password*`, `remember?` (boolean, default `false`).
+- Flujo:
+  1. Valida campos requeridos → 400 si faltan.
+  2. Valida formato de email con `isValidEmail` → 400 `'Email inválido'` si no.
+  3. Busca user por email. Si no existe, si `activo=false` o si password no matchea → `401 { error: 'Credenciales inválidas' }` (los tres casos son indistinguibles desde el cliente).
+  4. Firma JWT con `expiresIn: '8h'` o `'10d'` según `remember`.
 - 200:
   ```json
   {
     "token": "<jwt>",
+    "expires_at": "2026-05-12T03:00:00.000Z",
     "user": { "id", "nombre", "email", "role", "estudio_id" }
   }
   ```
-- 400 falta email/password · 401 credenciales inválidas · 403 usuario inactivo.
+- 400 falta email/password o formato de email inválido · 401 credenciales inválidas (incluye user inactivo).
 
 ---
 
@@ -261,10 +323,10 @@ Todo el router aplica `authenticate` + `requireRole('admin')`.
 
 #### `POST /api/admin/contadores`
 - Body: `nombre*`, `email*`, `password*` (mín 8), `estudio_id*`.
-- Valida que el email no esté tomado y que el estudio exista y esté activo.
+- Validaciones en orden: campos requeridos → formato de email (`isValidEmail`) → password ≥ 8 → email no tomado → estudio existe y activo.
 - Hashea password (bcrypt cost 12), inserta `role='contador'`, `activo=true`.
 - 201 → datos del contador (sin `password_hash`).
-- 400 faltan campos / password corta / estudio inactivo · 409 email duplicado.
+- 400 faltan campos / email inválido / password corta / estudio inactivo · 409 email duplicado.
 
 #### `GET /api/admin/contadores`
 - Lista todos los contadores ordenados por `created_at DESC`.
@@ -274,12 +336,12 @@ Todo el router aplica `authenticate` + `requireRole('admin')`.
 
 #### `PATCH /api/admin/contadores/:id`
 - Body opcional: `nombre`, `email`.
-- Valida unicidad de email (si se pasa).
-- 400 si no se envió ningún campo · 404 no existe · 409 email duplicado.
+- Si se manda `email`: valida formato (`isValidEmail`) y unicidad.
+- 400 si no se envió ningún campo o si el email tiene formato inválido · 404 no existe · 409 email duplicado.
 
 #### `PATCH /api/admin/contadores/:id/estado`
 - Body: `activo*` (boolean).
-- Activa / desactiva (soft delete). Un contador inactivo no puede loguear (login devuelve 403).
+- Activa / desactiva (soft delete). Un contador inactivo no puede loguear — el login devuelve `401 'Credenciales inválidas'` (mismo error que credencial inválida, para no enumerar usuarios).
 
 ---
 
@@ -289,8 +351,9 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 
 #### `POST /api/clientes`
 - Body: `nombre*`, `email*`, `password*` (mín 8), `cuit?`, `telefono?`.
-- `estudio_id` se toma del JWT del contador.
-- 201 → cliente creado · 400 faltan campos / password corta · 409 email duplicado.
+- `estudio_id` se toma del JWT del contador (nunca del body — si el body lo manda, se ignora).
+- Validaciones: campos requeridos → formato de email (`isValidEmail`) → password ≥ 8 → unicidad de email global.
+- 201 → cliente creado · 400 faltan campos / email inválido / password corta · 409 email duplicado.
 
 #### `GET /api/clientes`
 - Lista clientes del estudio del contador, ordenados por `nombre ASC`.
@@ -300,10 +363,18 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 
 #### `PATCH /api/clientes/:id`
 - Body opcional: `nombre`, `email`, `cuit`, `telefono`.
-- Valida unicidad de email.
+- Si se manda `email`: valida formato (`isValidEmail`) y unicidad.
+- 400 si email tiene formato inválido o si no se envió ningún campo · 404 no existe (incluye cliente de otro estudio) · 409 email duplicado.
 
 #### `PATCH /api/clientes/:id/estado`
 - Body: `activo*` (boolean). Soft delete.
+
+#### `PATCH /api/clientes/:id/password`
+- Reset de password por parte del contador del estudio.
+- Body: `password*` (string, mín 8).
+- Filtra `role='cliente'` + `estudio_id = req.user.estudio_id` (no permite cambiar password de admin/contador o de cliente de otro estudio).
+- 204 en éxito · 400 password corta o ausente · 404 cliente no encontrado en el estudio.
+- ⚠️ El cambio de password **no invalida** los JWT ya emitidos (no hay revocación stateful).
 
 ---
 
@@ -314,6 +385,7 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 #### Endpoints de cliente — `requireRole('cliente')`
 
 ##### `GET /api/impuestos/mis-impuestos`
+- Filtra por `cliente_id = req.user.id` **y** `estudio_id = req.user.estudio_id` (defensa en profundidad multi-tenant).
 - Devuelve los impuestos del cliente autenticado, agrupados:
   ```json
   { "pendientes": [...], "vencidos": [...], "pagados": [...] }
@@ -321,7 +393,7 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 - Orden interno por `fecha_vencimiento ASC`.
 
 ##### `GET /api/impuestos/mis-impuestos/:id`
-- Devuelve un impuesto que pertenezca a `req.user.id`. 404 si no.
+- Filtra por `id` + `cliente_id = req.user.id` + `estudio_id = req.user.estudio_id`. 404 si no matchea cualquiera de los tres.
 
 #### Endpoints de contador — `requireRole('contador')`
 
@@ -357,6 +429,20 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 
 ---
 
+### 8.6 `/api/internal` — trigger manual de cron
+
+Endpoint protegido por shared secret (no por JWT). Pensado para que un scheduler externo (Vercel Cron, GitHub Actions, cron de un host externo) dispare los jobs cuando el server corre en un entorno donde `node-cron` no es confiable (ej. serverless).
+
+#### `POST /api/internal/run-cron`
+- Header `x-cron-secret: <CRON_SECRET>` (comparación con `crypto.timingSafeEqual`).
+- Body opcional: `{ "job": "vencidos" | "recordatorios" | "all" }`. Default `"all"`.
+- 200 → `{ status: 'ok', ran: ['vencidos', 'recordatorios'] }`.
+- 400 si `job` no es uno de los valores válidos.
+- 401 si no manda `x-cron-secret` · 403 si el secret no matchea.
+- 503 si `CRON_SECRET` no está configurado en el server (forzar la rotación o configuración explícita en prod).
+
+---
+
 ## 9. Flujos clave
 
 ### 9.1 Flujo de creación de impuesto
@@ -376,19 +462,19 @@ contador POST /api/impuestos
 
 ### 9.2 Cron jobs (`src/jobs/vencimientosCron.ts`)
 
-Dos jobs registrados en `initCronJobs()`, ambos a las **08:00 ART** (`America/Argentina/Buenos_Aires`).
+Dos jobs registrados en `initCronJobs()`, ambos a las **08:00 ART** (`America/Argentina/Buenos_Aires`). Ambos también son disparables vía `POST /api/internal/run-cron` (ver 8.6).
 
 #### Job 1 — `procesarVencidos`
 1. `today = fecha actual en zona AR` (formateada `YYYY-MM-DD`).
-2. SELECT impuestos `estado='pendiente'` con `fecha_vencimiento < today`, joins a `users` para email del cliente y del contador.
+2. SELECT impuestos `estado='pendiente'` con `fecha_vencimiento < today`, joins a `users` para email y nombre del cliente.
 3. Para cada uno:
+   - Si ya existe notificación `tipo='vencido'` para ese impuesto → skip (anti-dup vía tabla `notificaciones`).
    - UPDATE `estado='vencido'`.
-   - Si ya existe notificación `tipo='vencido'` para ese impuesto → skip (anti-dup).
-   - `sendVencido([cliente.email, contador.email], { nombre_cliente, tipo })`.
-   - INSERT 2 filas en `notificaciones` (cliente + contador, tipo `vencido`).
+   - `sendVencido(cliente.email, { nombre_cliente, tipo })` — un solo destinatario (el cliente).
+   - INSERT 1 fila en `notificaciones` (`user_id = cliente.id`, `tipo='vencido'`).
 4. Loguea `procesados/total`.
 
-`runVencimientosCron()` está exportado (corre solo `procesarVencidos`) — útil para disparar manualmente. **No está expuesto como endpoint** en este momento.
+> ⚠️ El UPDATE de estado a `'vencido'` ocurre **antes** del envío de email. Si el email falla, el estado ya quedó cambiado pero no se inserta en `notificaciones`. El próximo cron run no lo reintenta porque ya no está en `pendiente`. Conocido — pendiente de fix.
 
 #### Job 2 — `procesarRecordatorios`
 1. `targetDate = today + 3 días` (suma en UTC con ancla `T12:00:00Z` para evitar saltos por DST).
@@ -400,7 +486,7 @@ Dos jobs registrados en `initCronJobs()`, ambos a las **08:00 ART** (`America/Ar
 4. Loguea `enviados/total`.
 
 #### Idempotencia
-La tabla `notificaciones` actúa como log y como guardia: antes de enviar, se busca una fila `(impuesto_id, tipo)`; si existe, se omite el envío. Esto garantiza que reiniciar el server o correr el job dos veces no duplica emails.
+La tabla `notificaciones` actúa como log y como guardia: antes de enviar, se busca una fila `(impuesto_id, tipo)`; si existe, se omite el envío. Esto garantiza que correr el job dos veces no duplica emails para `recordatorios`. Para `vencidos` la guardia es indirecta (vía el cambio de estado, ver caveat arriba).
 
 ### 9.3 Flujo de email (`src/services/emailService.ts`)
 
@@ -410,9 +496,10 @@ Tres funciones:
 |---|---|---|
 | `sendNuevoImpuesto` | `Nuevo vencimiento: <tipo>` | cliente |
 | `sendRecordatorio` | `Recordatorio: <tipo> vence el DD/MM/YYYY` | cliente |
-| `sendVencido` | `⚠️ Vencimiento no pagado: <tipo>` | cliente + contador |
+| `sendVencido` | `⚠️ Vencimiento no pagado: <tipo>` | cliente |
 
 Todas:
+- Honran `EMAILS_ENABLED`: si no es `'true'`, loguean `SKIP` y retornan sin pegarle a Resend (útil en dev/test).
 - Usan `process.env.EMAIL_FROM` (con fallback) como remitente.
 - Escapan HTML (`escapeHtml`) en cualquier valor proveniente del usuario (nombre, tipo).
 - `link_pago` pasa por `safeHref`: solo se renderiza si empieza con `https://` — protege contra `javascript:` y similares.
@@ -424,31 +511,36 @@ Todas:
 ## 10. Decisiones / convenciones del código
 
 - **Errores 500 genéricos**: todos los controladores devuelven `{ error: 'Error interno del servidor' }` en caso de fallo de Supabase o excepción no esperada. No se filtra mensaje interno al cliente.
-- **Validación inline**: los controladores validan body manualmente (no hay zod / joi). Mantener la consistencia: regex + tipo + length checks.
+- **Validación inline**: los controladores validan body manualmente (no hay zod / joi). Mantener la consistencia: regex + tipo + length checks. La única utility compartida es `isValidEmail()` en `src/utils/validators.ts`.
 - **`maybeSingle()` vs `single()`**: se usa `maybeSingle()` cuando "no encontrado" es un caso esperado (404), y `single()` solo donde se garantiza la existencia (después de un INSERT con `select(...)`).
 - **`USER_FIELDS`**: constante en `adminController` y `clientesController` que enumera explícitamente las columnas a retornar. **Nunca incluir `password_hash`** en este SELECT.
-- **`estudio_id` desde JWT, no desde body**: previene que un contador cree recursos en otro estudio falsificando un campo. Vale para todo: clientes, impuestos.
+- **`estudio_id` desde JWT, no desde body**: previene que un contador cree recursos en otro estudio falsificando un campo. Vale para todo: clientes, impuestos. Aplica también a los endpoints del cliente final (`/mis-impuestos`, `/mis-impuestos/:id`).
 - **Transición de estado de impuesto**:
   - `pendiente → pagado`: vía `PATCH /:id/estado` (contador).
   - `pendiente → vencido`: vía cron, no vía endpoint.
   - `pagado` es terminal (no se edita ni se vuelve a marcar).
 - **HTTPS-only en `link_pago`**: validado en POST y PATCH del impuesto, y de nuevo en el HTML del email (`safeHref`).
 - **CORS allowlist**: si `origin` viene undefined (curl, server-to-server) se permite. Si viene seteado, debe estar en la lista. Esto es deliberado.
+- **Trust proxy**: siempre `1` en `createApp()`. Si en el futuro hay más capas de proxy (cliente → CDN → load balancer → app), subir este número o pasar una función de validación.
+- **Login no enumera usuarios**: las tres condiciones de credencial inválida (email inexistente, password mala, user inactivo) responden idénticamente. No agregar mensajes específicos que rompan esta propiedad.
 
 ---
 
-## 11. Riesgos / cosas a tener en cuenta al mantener
+## 11. Riesgos conocidos / pendientes
 
 1. **`SUPABASE_SERVICE_KEY` bypasea RLS**. Toda autorización vive en este backend; cualquier query nueva debe replicar el filtro `estudio_id` o el aislamiento se rompe.
 2. **No hay paginación** en los listados (`/contadores`, `/clientes`, `/impuestos`). Si los volúmenes crecen, hay que agregar `range()` y un parámetro `?page` / `?limit`.
-3. **No hay refresh tokens**. El JWT dura 8h y luego hay que volver a loguear. Si se quiere sesión más larga, hay que diseñar un mecanismo de refresh.
-4. **No hay endpoint de cambio de contraseña** ni recuperación. Hay que crearlos (y mandarles email vía Resend) cuando se necesite.
-5. **El cron corre dentro del mismo proceso del server**. Si el server reinicia justo a las 08:00 ART se podría perder una corrida. Si se necesita garantía, mover a un worker separado o a un job externo (Supabase scheduled functions, GitHub Actions, etc.).
-6. **No hay tests automatizados** todavía. El script `test` es un placeholder.
-7. **`sendVencido` envía un solo email con cliente y contador en `to`**, así que ambos ven los emails del otro. Si eso no se quiere, partirlo en dos envíos separados.
-8. **No se borra nada físicamente** — todo es soft delete vía `activo=false`. Asumir esto antes de agregar `DELETE` endpoints.
-9. **El compilador TS no compila tests porque no hay**, pero `tsc` (`pnpm build`) debería pasar limpio en CI antes de merge.
-10. **Variables `.env` requeridas**: si falta una, el server tira en arranque. Mantener `.env.example` actualizado (no existe hoy — convendría crearlo).
+3. **JWT sin revocación**. El token sigue valido hasta `exp` aunque el user sea desactivado o cambie su password. Mitigación parcial: chequear `users.activo` en cada request (cost: 1 query/request) o introducir `token_version` en el JWT.
+4. **No hay recuperación de password self-service**. Existe `PATCH /api/clientes/:id/password` (contador reset cliente). Para admin / contador no hay endpoint.
+5. **Cron en proceso del server**. Si el server reinicia justo a las 08:00 ART se podría perder una corrida; en deploys serverless (Vercel) el cron de `node-cron` directamente no corre — usar el trigger externo vía `POST /api/internal/run-cron` con `CRON_SECRET`.
+6. **Cron `vencidos` actualiza estado antes del email**. Si Resend falla, el impuesto queda en `vencido` pero sin notificación enviada y no se reintenta. Documentado en 9.2.
+7. **Race condition pagado vs vencido**: el endpoint `PATCH /:id/estado` y el cron pueden pisarse si corren simultáneamente (SELECT-then-UPDATE no atómico). Mitigar con UPDATE condicional (`.neq('estado', 'pagado')`).
+8. **`actualizarImpuesto` permite editar un impuesto `vencido`** (solo bloquea `pagado`). Si se cambia `fecha_vencimiento` a futuro, el estado queda `vencido` aunque la nueva fecha no haya vencido.
+9. **Email globalmente único** (constraint del schema). Un contador del estudio A que intenta crear un cliente con un email ya usado en estudio B recibe 409 — leakea existencia cross-tenant. Tradeoff a discutir.
+10. **No hay validación de fecha_vencimiento en el pasado**. Crear impuesto con fecha pasada genera email "nuevo" + email "vencido" al día siguiente.
+11. **No se borra nada físicamente** — todo es soft delete vía `activo=false`. Asumir esto antes de agregar `DELETE` endpoints.
+12. **Variables `.env` requeridas**: si falta una, el server tira en arranque. Mantener `.env.example` actualizado (no existe hoy — convendría crearlo).
+13. **Sin Helmet ni headers de seguridad** (HSTS, X-Frame-Options, CSP). Render/Vercel meten algunos por default pero no todos.
 
 ---
 
@@ -493,11 +585,79 @@ Para correr el cron en producción es necesario que el proceso siga vivo (PM2, s
 
 | Cambio que querés hacer | Archivo |
 |---|---|
-| Agregar un endpoint nuevo | `src/routes/<feature>.ts` + controller en `src/controllers/` + montaje en `src/index.ts` |
+| Agregar un endpoint nuevo | `src/routes/<feature>.ts` + controller en `src/controllers/` + montaje en `src/app.ts` |
 | Agregar un rol o permiso | `src/types/index.ts` (Role) + middleware `requireRole` ya soporta varargs |
 | Cambiar template de email | `src/services/emailService.ts` |
 | Cambiar horario / lógica del cron | `src/jobs/vencimientosCron.ts` |
 | Agregar columna a una tabla | `src/database/schema.sql` + tipos en `src/types/index.ts` + queries afectadas |
-| Cambiar duración del JWT | `src/controllers/authController.ts` (`expiresIn`) |
+| Cambiar duración del JWT | `src/controllers/authController.ts` (`expiresIn`, ramas `remember`) |
 | Cambiar rate limit del login | `src/middleware/rateLimits.ts` |
+| Cambiar el comportamiento detrás de proxy | `src/app.ts` (`app.set('trust proxy', ...)`) |
 | Agregar origen al CORS | env var `ALLOWED_ORIGINS` (CSV) |
+| Agregar un validador compartido | `src/utils/validators.ts` (hoy solo `isValidEmail`) |
+| Disparar cron manualmente desde fuera del proceso | `POST /api/internal/run-cron` con `x-cron-secret` |
+
+---
+
+## 15. Tests
+
+Suite con **Vitest** + **supertest**. Comandos:
+
+```bash
+pnpm test           # corre una sola vez
+pnpm test:watch     # modo watch
+pnpm test:cov       # con coverage v8
+```
+
+### 15.1 Setup
+
+- `tests/setup.ts` setea env vars deterministas (`JWT_SECRET=test-secret`, `EMAILS_ENABLED=false`, etc.) antes de cualquier import del SUT.
+- Vitest config (`vitest.config.ts`):
+  - `pool: 'forks'`, `isolate: true` → cada archivo de test corre en su propio worker, mocks no contaminan otros archivos.
+  - `clearMocks` y `restoreMocks` activos.
+  - Coverage excluye `src/index.ts`, `src/types/**`, `src/database/**`.
+
+### 15.2 Helpers (`tests/helpers/`)
+
+- **`supabaseMock.ts`** — `createSupabaseMock()` devuelve un cliente compatible con el chain de `@supabase/supabase-js`. Soporta `from`, `select/insert/update/delete`, filtros (`eq/neq/lt/gt/...`), terminales (`single/maybeSingle/await`). Programás respuestas con `sb.queue([{ table, result }, ...])` e inspeccionás llamadas con `sb.calls`.
+- **`factories.ts`** — `makeUser`, `makeImpuesto`, `makeJWT` (firma con el secret de test).
+- **`auth.ts`** — `bearerFor(user)`, `expiredBearerFor(user)`, `badSignatureBearerFor(user)`.
+
+### 15.3 Cobertura
+
+Archivos de test alineados 1:1 con módulos:
+
+| Test file | Cubre |
+|---|---|
+| `tests/app.test.ts` | `createApp()`, `trust proxy`, `req.ip` con `X-Forwarded-For` |
+| `tests/auth.test.ts` | `POST /api/auth/login` (validaciones, anti-enumeration, remember, JWT TTL) |
+| `tests/admin.test.ts` | `/api/admin/*` (auth gate, CRUD contadores, validación de email) |
+| `tests/clientes.test.ts` | `/api/clientes/*` (auth gate, CRUD, password reset, multi-tenancy) |
+| `tests/impuestos.test.ts` | `/api/impuestos/*` (contador + cliente, multi-tenancy con estudio_id, transiciones de estado) |
+| `tests/middleware/auth.test.ts` | JWT middleware |
+| `tests/middleware/roles.test.ts` | `requireRole(...roles)` |
+| `tests/utils/validators.test.ts` | `isValidEmail` |
+
+> Convención: cada test queda mockeado de DB y de email — no se pegan a servicios reales. Para validar el envío real de email, setear `EMAILS_ENABLED=true` y correr a mano contra Resend en un dominio de staging.
+
+---
+
+## 16. Changelog de la última auditoría (2026-05)
+
+Cuatro fixes aplicados desde la auditoría de seguridad pre-producción:
+
+| Fix | Archivo principal | Qué cambió |
+|---|---|---|
+| **FIX 1 — trust proxy** | `src/app.ts` | `app.set('trust proxy', 1)` para que `req.ip` y `express-rate-limit` vean la IP real detrás de Render/Vercel/Cloudflare, no la del proxy. |
+| **FIX 2 — anti-enumeration en login** | `src/controllers/authController.ts` | Usuario inactivo ahora responde `401 { error: 'Credenciales inválidas' }` (antes era `403 'Usuario inactivo'`), idéntico a email inexistente y password mala. |
+| **FIX 3 — `estudio_id` en endpoints de cliente** | `src/controllers/impuestosController.ts` | `misImpuestos` y `miImpuesto` ahora también filtran por `estudio_id` del JWT (defensa en profundidad). |
+| **FIX 4 — validación de formato de email** | `src/utils/validators.ts` (nuevo) | `isValidEmail()` aplicado en `login`, `crearContador`, `actualizarContador`, `crearCliente`, `actualizarCliente`. Devuelve `400 { error: 'Email inválido' }` antes de tocar DB. |
+
+Tests asociados: ver tabla en sección 15.3. Total: 153 tests en 8 archivos pasando verde después de los fixes.
+
+Pendientes priorizados (no aplicados todavía — ver sección 11):
+
+- Cron `vencidos` con estado antes del email (riesgo 6).
+- Race condition `pagado` vs `vencido` (riesgo 7).
+- `actualizarImpuesto` permite editar `vencido` sin resetear estado (riesgo 8).
+- JWT sin revocación al desactivar / cambiar password (riesgo 3).
