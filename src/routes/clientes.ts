@@ -7,6 +7,7 @@ import {
   obtenerCliente,
   actualizarCliente,
   actualizarEstadoCliente,
+  cambiarPasswordCliente,
 } from '../controllers/clientesController';
 
 const router = Router();
@@ -18,5 +19,6 @@ router.post('/', crearCliente);
 router.get('/:id', obtenerCliente);
 router.patch('/:id', actualizarCliente);
 router.patch('/:id/estado', actualizarEstadoCliente);
+router.patch('/:id/password', cambiarPasswordCliente);
 
 export default router;

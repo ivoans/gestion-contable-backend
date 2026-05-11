@@ -5,7 +5,11 @@ import { supabase } from '../lib/supabase';
 import { User, JwtPayload } from '../types';
 
 export async function login(req: Request, res: Response): Promise<void> {
-  const { email, password } = req.body as { email: string; password: string };
+  const { email, password, remember } = req.body as {
+    email: string;
+    password: string;
+    remember?: boolean;
+  };
 
   if (!email || !password) {
     res.status(400).json({ error: 'Email y password requeridos' });
@@ -49,10 +53,15 @@ export async function login(req: Request, res: Response): Promise<void> {
       estudio_id: typedUser.estudio_id,
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: '8h' });
+    const expiresIn = remember === true ? '10d' : '8h';
+    const token = jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn });
+
+    const decoded = jwt.decode(token) as { exp: number };
+    const expires_at = new Date(decoded.exp * 1000).toISOString();
 
     res.json({
       token,
+      expires_at,
       user: {
         id: typedUser.id,
         nombre: typedUser.nombre,
