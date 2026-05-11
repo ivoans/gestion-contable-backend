@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { supabase } from '../lib/supabase';
 import { User, JwtPayload } from '../types';
+import { isValidEmail } from '../utils/validators';
 
 export async function login(req: Request, res: Response): Promise<void> {
   const { email, password, remember } = req.body as {
@@ -13,6 +14,11 @@ export async function login(req: Request, res: Response): Promise<void> {
 
   if (!email || !password) {
     res.status(400).json({ error: 'Email y password requeridos' });
+    return;
+  }
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: 'Email inválido' });
     return;
   }
 
@@ -36,7 +42,7 @@ export async function login(req: Request, res: Response): Promise<void> {
     const typedUser = user as User & { password_hash: string };
 
     if (!typedUser.activo) {
-      res.status(403).json({ error: 'Usuario inactivo' });
+      res.status(401).json({ error: 'Credenciales inválidas' });
       return;
     }
 

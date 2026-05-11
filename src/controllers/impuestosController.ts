@@ -307,12 +307,14 @@ export async function cambiarEstadoImpuesto(req: Request, res: Response): Promis
 
 export async function misImpuestos(req: Request, res: Response): Promise<void> {
   const cliente_id = req.user!.id;
+  const estudio_id = req.user!.estudio_id;
 
   try {
     const { data, error } = await supabase
       .from('impuestos')
       .select('*')
       .eq('cliente_id', cliente_id)
+      .eq('estudio_id', estudio_id)
       .order('fecha_vencimiento', { ascending: true });
 
     if (error) {
@@ -334,6 +336,7 @@ export async function misImpuestos(req: Request, res: Response): Promise<void> {
 export async function miImpuesto(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const cliente_id = req.user!.id;
+  const estudio_id = req.user!.estudio_id;
 
   try {
     const { data, error } = await supabase
@@ -341,6 +344,7 @@ export async function miImpuesto(req: Request, res: Response): Promise<void> {
       .select('*')
       .eq('id', id)
       .eq('cliente_id', cliente_id)
+      .eq('estudio_id', estudio_id)
       .maybeSingle();
 
     if (error) {
