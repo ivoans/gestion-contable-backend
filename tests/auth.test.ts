@@ -136,6 +136,64 @@ describe('POST /api/auth/login', () => {
     expect(ttl).toBe(8 * 60 * 60);
   });
 
+  it('login sin remember → token con exp ~8h y expires_at coherente', async () => {
+    const user = makeUser();
+    sb.queue([
+      { table: 'users', result: { data: { ...user, password_hash: 'h' }, error: null } },
+    ]);
+    bcryptMock.compare.mockResolvedValue(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: user.email, password: 'ok' });
+
+    expect(res.status).toBe(200);
+    const decoded = jwt.decode(res.body.token) as { exp: number; iat: number };
+    expect(decoded.exp - decoded.iat).toBe(8 * 60 * 60);
+    // exp ≈ now + 8h con tolerancia de 5s
+    expect(Math.abs(decoded.exp - (before + 8 * 60 * 60))).toBeLessThan(5);
+    // expires_at refleja exp
+    expect(new Date(res.body.expires_at).getTime()).toBe(decoded.exp * 1000);
+  });
+
+  it('login con remember:true → token con exp ~10d', async () => {
+    const user = makeUser();
+    sb.queue([
+      { table: 'users', result: { data: { ...user, password_hash: 'h' }, error: null } },
+    ]);
+    bcryptMock.compare.mockResolvedValue(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: user.email, password: 'ok', remember: true });
+
+    expect(res.status).toBe(200);
+    const decoded = jwt.decode(res.body.token) as { exp: number; iat: number };
+    expect(decoded.exp - decoded.iat).toBe(10 * 24 * 60 * 60);
+    expect(Math.abs(decoded.exp - (before + 10 * 24 * 60 * 60))).toBeLessThan(5);
+    expect(new Date(res.body.expires_at).getTime()).toBe(decoded.exp * 1000);
+  });
+
+  it('login con remember:false → token con exp ~8h (igual que sin enviar)', async () => {
+    const user = makeUser();
+    sb.queue([
+      { table: 'users', result: { data: { ...user, password_hash: 'h' }, error: null } },
+    ]);
+    bcryptMock.compare.mockResolvedValue(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: user.email, password: 'ok', remember: false });
+
+    expect(res.status).toBe(200);
+    const decoded = jwt.decode(res.body.token) as { exp: number; iat: number };
+    expect(decoded.exp - decoded.iat).toBe(8 * 60 * 60);
+    expect(Math.abs(decoded.exp - (before + 8 * 60 * 60))).toBeLessThan(5);
+  });
+
   it('chain supabase: from(users).select(*).eq(email).maybeSingle()', async () => {
     sb.queue([{ table: 'users', result: { data: null, error: null } }]);
     await request(app)
