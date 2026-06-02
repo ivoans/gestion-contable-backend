@@ -587,6 +587,109 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
 
 ---
 
+### 3.6 Vencimientos — `/api/vencimientos`
+
+Auth aplicada **por ruta** + rol **contador** (`authenticate, requireRole('contador')` en cada handler).
+**Multi-tenant:** todas las rutas filtran/escriben por `estudio_id` del token. El `estudio_id` del body, si viene, **se ignora**. Un recurso de otro estudio responde **404**.
+
+Calendario impositivo que carga el contador. El backend almacena/devuelve por dígito individual (`terminacion_cuit` 0–9) o `null` (= "todos"); **no** expande grupos (eso es del frontend).
+
+**Shape de `Vencimiento` que devuelven los endpoints** (campos `VENCIMIENTO_FIELDS`):
+```json
+{
+  "id": "uuid",
+  "estudio_id": "uuid",
+  "obligacion": "monotributo|iva|autonomos|ingresos_brutos",
+  "terminacion_cuit": 0,
+  "anio": 2026,
+  "mes": 6,
+  "fecha_vencimiento": "2026-06-15",
+  "created_at": "ISO-8601"
+}
+```
+> `terminacion_cuit` es `number (0–9)` o `null` (= "todos", p. ej. monotributo).
+
+#### `GET /api/vencimientos`
+- **Rol:** contador.
+- **Lista los vencimientos del estudio** para un año (y obligación si se filtra), ordenados por `obligacion` asc, `mes` asc, `terminacion_cuit` asc (nulls first).
+- **Query params:**
+
+  | Param | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `anio` | number | no | si viene, entero entre **2024 y 2100**. Si falta, usa el **año actual** del server. |
+  | `obligacion` | string | no | si viene, debe ser `monotributo`, `iva`, `autonomos` o `ingresos_brutos` |
+
+- **Response 200:** `Vencimiento[]`.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `anio` no entero o fuera de 2024–2100 | `{ "error": "anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `obligacion` con valor inválido | `{ "error": "obligacion debe ser una de: monotributo, iva, autonomos, ingresos_brutos" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+#### `PUT /api/vencimientos`
+- **Rol:** contador.
+- **Upsert masivo idempotente** del calendario. Por cada entry: `estudio_id` se toma del token; upsert con `onConflict` sobre `(estudio_id, obligacion, terminacion_cuit, anio, mes)`. Si la fila existe, **actualiza** `fecha_vencimiento`; si no, **inserta**.
+- **Request body:**
+  ```json
+  {
+    "entries": [
+      { "obligacion": "iva", "terminacion_cuit": 3, "anio": 2026, "mes": 6, "fecha_vencimiento": "2026-06-18" },
+      { "obligacion": "monotributo", "terminacion_cuit": null, "anio": 2026, "mes": 6, "fecha_vencimiento": "2026-06-20" }
+    ]
+  }
+  ```
+
+  | Campo (por entry) | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `obligacion` | string | sí | `monotributo`, `iva`, `autonomos` o `ingresos_brutos` |
+  | `terminacion_cuit` | number\|null | sí* | `null` (= "todos") o entero **0–9**. `undefined` se trata como `null`. |
+  | `anio` | number | sí | entero entre **2024 y 2100** |
+  | `mes` | number | sí | entero entre **1 y 12** |
+  | `fecha_vencimiento` | string | sí | formato exacto `YYYY-MM-DD` y fecha parseable |
+
+  > `estudio_id` en el body **se ignora** (se fuerza desde el token).
+  > Las entries se **deduplican por clave de conflicto** antes del upsert (conserva la última ocurrencia) para no violar el `ON CONFLICT` de Postgres.
+
+- **Response 200:**
+  ```json
+  {
+    "count": 2,
+    "data": [ /* Vencimiento[] */ ]
+  }
+  ```
+  > `count` = filas afectadas (tras dedup). `data` = filas resultantes con `VENCIMIENTO_FIELDS`.
+
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `entries` no es array o está vacío | `{ "error": "entries debe ser un array no vacío" }` |
+  | 400 | `entries` supera **500** elementos | `{ "error": "entries no puede superar 500 elementos" }` |
+  | 400 | `obligacion` inválida en `entries[i]` | `{ "error": "entries[i].obligacion debe ser una de: monotributo, iva, autonomos, ingresos_brutos" }` |
+  | 400 | `terminacion_cuit` inválido en `entries[i]` | `{ "error": "entries[i].terminacion_cuit debe ser null o un entero entre 0 y 9" }` |
+  | 400 | `anio` inválido en `entries[i]` | `{ "error": "entries[i].anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `mes` inválido en `entries[i]` | `{ "error": "entries[i].mes debe ser un entero entre 1 y 12" }` |
+  | 400 | `fecha_vencimiento` inválida en `entries[i]` | `{ "error": "entries[i].fecha_vencimiento debe tener formato YYYY-MM-DD" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+  > **Idempotencia:** correr el mismo `PUT` dos veces no duplica filas, **incluido** `terminacion_cuit = null`. El índice único `(estudio_id, obligacion, terminacion_cuit, anio, mes)` es `NULLS NOT DISTINCT` (PG15+), así el `null` ("todos") también colisiona y se actualiza en vez de duplicarse.
+  > `i` en los mensajes es el índice 0-based del entry que falló; se valida en orden y se corta en el primero inválido.
+
+#### `DELETE /api/vencimientos/:id`
+- **Rol:** contador.
+- **Borra un vencimiento por id**, solo si pertenece al estudio del token.
+- **Response 204:** sin body.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 404 | El vencimiento no existe o es de otro estudio | `{ "error": "Vencimiento no encontrado" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+---
+
 ## 4. Reglas de negocio
 
 ### Aislamiento multi-tenant

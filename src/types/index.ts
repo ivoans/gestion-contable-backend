@@ -1,6 +1,7 @@
 export type Role = 'admin' | 'contador' | 'cliente';
 export type EstadoImpuesto = 'pendiente' | 'vencido' | 'pagado';
 export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido';
+export type Obligacion = 'monotributo' | 'iva' | 'autonomos' | 'ingresos_brutos';
 
 export interface User {
   id: string;
@@ -36,6 +37,17 @@ export interface Impuesto {
   pagado_por: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Vencimiento {
+  id: string;
+  estudio_id: string;
+  obligacion: Obligacion;
+  terminacion_cuit: number | null;
+  anio: number;
+  mes: number;
+  fecha_vencimiento: string;
+  created_at: string;
 }
 
 export interface Notificacion {
