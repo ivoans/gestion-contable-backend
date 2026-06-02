@@ -5,6 +5,7 @@ import { User } from '../types';
 import { isValidEmail } from '../utils/validators';
 
 const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
+const ESTUDIO_FIELDS = 'id, nombre, activo, created_at';
 
 export async function crearContador(req: Request, res: Response): Promise<void> {
   const { nombre, email, password, estudio_id } = req.body as {
@@ -78,6 +79,25 @@ export async function listarContadores(_req: Request, res: Response): Promise<vo
       .select(USER_FIELDS)
       .eq('role', 'contador')
       .order('created_at', { ascending: false });
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+export async function listarEstudios(_req: Request, res: Response): Promise<void> {
+  try {
+    const { data, error } = await supabase
+      .from('estudios')
+      .select(ESTUDIO_FIELDS)
+      .eq('activo', true)
+      .order('nombre', { ascending: true });
 
     if (error) {
       res.status(500).json({ error: 'Error interno del servidor' });

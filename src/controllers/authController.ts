@@ -65,16 +65,12 @@ export async function login(req: Request, res: Response): Promise<void> {
     const decoded = jwt.decode(token) as { exp: number };
     const expires_at = new Date(decoded.exp * 1000).toISOString();
 
+    const { password_hash: _password_hash, ...userData } = typedUser;
+
     res.json({
       token,
       expires_at,
-      user: {
-        id: typedUser.id,
-        nombre: typedUser.nombre,
-        email: typedUser.email,
-        role: typedUser.role,
-        estudio_id: typedUser.estudio_id,
-      },
+      user: userData,
     });
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
