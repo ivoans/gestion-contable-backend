@@ -23,11 +23,13 @@ export type FromCall = {
 
 export type RecordedCall = {
   table: string;
-  op: 'select' | 'insert' | 'update' | 'delete' | null;
+  op: 'select' | 'insert' | 'update' | 'delete' | 'upsert' | null;
   /** Filtros encadenados, en orden. Ej: [['eq','id','xxx'], ['neq','estado','pagado']]. */
   filters: Array<[string, ...any[]]>;
-  /** Payload de insert/update si hubo. */
+  /** Payload de insert/update/upsert si hubo. */
   payload?: any;
+  /** Opción onConflict pasada a upsert (args[1].onConflict), si hubo. */
+  onConflict?: string;
   terminal: 'single' | 'maybeSingle' | 'await' | null;
 };
 
@@ -40,12 +42,12 @@ export type SupabaseMock = {
 };
 
 const PASSTHROUGH = [
-  'select', 'insert', 'update', 'delete',
+  'select', 'insert', 'update', 'delete', 'upsert',
   'eq', 'neq', 'lt', 'gt', 'lte', 'gte',
   'in', 'is', 'or', 'order', 'limit', 'range', 'match',
 ] as const;
 
-const TERMINALS_OP = new Set(['select', 'insert', 'update', 'delete']);
+const TERMINALS_OP = new Set(['select', 'insert', 'update', 'delete', 'upsert']);
 
 export function createSupabaseMock(initial: FromCall[] = []): SupabaseMock {
   let pending: FromCall[] = [...initial];
@@ -62,8 +64,11 @@ export function createSupabaseMock(initial: FromCall[] = []): SupabaseMock {
           if (recorded.op === null) {
             recorded.op = method as RecordedCall['op'];
           }
-          if (method === 'insert' || method === 'update') {
+          if (method === 'insert' || method === 'update' || method === 'upsert') {
             recorded.payload = args[0];
+          }
+          if (method === 'upsert') {
+            recorded.onConflict = args[1]?.onConflict;
           }
         } else {
           recorded.filters.push([method, ...args]);

@@ -161,12 +161,17 @@ describe('POST /api/auth/login', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.token).toBeTruthy();
+    // Shape COMPLETO de User (sin password_hash) — unificado en todo el back.
     expect(res.body.user).toEqual({
       id: user.id,
+      estudio_id: user.estudio_id,
       nombre: user.nombre,
       email: user.email,
       role: user.role,
-      estudio_id: user.estudio_id,
+      cuit: user.cuit,
+      telefono: user.telefono,
+      activo: user.activo,
+      created_at: user.created_at,
     });
     // No leak password_hash en response.
     expect(res.body.user).not.toHaveProperty('password_hash');
