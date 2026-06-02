@@ -11,8 +11,10 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- ============================================================
 
 CREATE TYPE role AS ENUM ('admin', 'contador', 'cliente');
-CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado');
+CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado', 'borrador');
 CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido');
+CREATE TYPE condicion_fiscal AS ENUM ('monotributista', 'responsable_inscripto');
+CREATE TYPE obligacion AS ENUM ('monotributo', 'iva', 'autonomos', 'ingresos_brutos');
 
 -- ============================================================
 -- TABLA: estudios
@@ -38,6 +40,8 @@ CREATE TABLE users (
   role          role NOT NULL,
   cuit          VARCHAR(13),
   telefono      VARCHAR(20),
+  condicion_fiscal condicion_fiscal,  -- NULL: admin/contador o cliente sin clasificar
+  categoria     VARCHAR,              -- letra del monotributo, solo referencia
   activo        BOOLEAN NOT NULL DEFAULT true,
   created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 
@@ -58,21 +62,49 @@ CREATE TABLE impuestos (
   cliente_id        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   creado_por        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   tipo              VARCHAR(100) NOT NULL,
-  monto             DECIMAL(12, 2) NOT NULL CHECK (monto > 0),
+  monto             DECIMAL(12, 2),
   fecha_vencimiento DATE NOT NULL,
   descripcion       TEXT,
   link_pago         VARCHAR(500),
+  vep               VARCHAR,
+  obligacion        obligacion,  -- NULL = impuesto manual
+  periodo           DATE,        -- mes declarado; NULL = manual
   estado            estado_impuesto NOT NULL DEFAULT 'pendiente',
   pagado_at         TIMESTAMP WITH TIME ZONE,
   pagado_por        UUID REFERENCES users(id) ON DELETE RESTRICT,
   created_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 
+  -- Si NO es borrador -> monto obligatorio y > 0. Si es borrador -> monto puede ser NULL.
+  CONSTRAINT chk_monto_por_estado CHECK (
+    (estado <> 'borrador' AND monto IS NOT NULL AND monto > 0)
+    OR estado = 'borrador'
+  ),
+
   -- Si está pagado, tiene que tener pagado_at y pagado_por
   CONSTRAINT chk_pagado_completo CHECK (
     (estado = 'pagado' AND pagado_at IS NOT NULL AND pagado_por IS NOT NULL) OR
     (estado != 'pagado' AND pagado_at IS NULL AND pagado_por IS NULL)
   )
+);
+
+-- ============================================================
+-- TABLA: vencimientos (calendario que carga la contadora)
+-- ============================================================
+
+CREATE TABLE vencimientos (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id        UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  obligacion        obligacion NOT NULL,
+  terminacion_cuit  SMALLINT CHECK (terminacion_cuit BETWEEN 0 AND 9),  -- NULL = "todos"
+  anio              INT NOT NULL,
+  mes               SMALLINT NOT NULL CHECK (mes BETWEEN 1 AND 12),
+  fecha_vencimiento DATE NOT NULL,
+  created_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  -- NULLS NOT DISTINCT (PG15+): la fila "todos" (terminacion_cuit NULL) no se duplica.
+  CONSTRAINT uq_vencimientos UNIQUE NULLS NOT DISTINCT
+    (estudio_id, obligacion, terminacion_cuit, anio, mes)
 );
 
 -- ============================================================
@@ -105,6 +137,13 @@ CREATE INDEX idx_impuestos_fecha_vencimiento ON impuestos(fecha_vencimiento);
 -- Índice compuesto para el cron job (busca pendientes vencidos todos los días)
 CREATE INDEX idx_impuestos_cron ON impuestos(estado, fecha_vencimiento)
   WHERE estado = 'pendiente';
+-- Anti-duplicado de la generación automática, sin afectar a los manuales (obligacion NULL)
+CREATE UNIQUE INDEX uq_impuestos_obligacion_periodo
+  ON impuestos (cliente_id, obligacion, periodo)
+  WHERE obligacion IS NOT NULL;
+
+-- vencimientos
+CREATE INDEX idx_vencimientos_estudio_id ON vencimientos(estudio_id);
 
 -- notificaciones
 CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
