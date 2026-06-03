@@ -1,4 +1,5 @@
 export type Role = 'admin' | 'contador' | 'cliente';
+export type CondicionFiscal = 'monotributista' | 'responsable_inscripto';
 export type EstadoImpuesto = 'pendiente' | 'vencido' | 'pagado';
 export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido';
 export type Obligacion = 'monotributo' | 'iva' | 'autonomos' | 'ingresos_brutos';
@@ -10,6 +11,8 @@ export interface User {
   email: string;
   role: Role;
   cuit: string | null;
+  condicion_fiscal: CondicionFiscal | null;
+  categoria: string | null;
   telefono: string | null;
   activo: boolean;
   created_at: string;

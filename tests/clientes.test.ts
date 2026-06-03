@@ -55,6 +55,11 @@ describe('clientes', () => {
     });
   });
 
+  // CUIT 20-11111111-2: dígito verificador correcto (módulo 11). El proyecto lo
+  // normaliza a 11 dígitos al persistir.
+  const CUIT_VALIDO = '20-11111111-2';
+  const CUIT_VALIDO_NORM = '20111111112';
+
   describe('POST /api/clientes', () => {
     it('400 si falta nombre/email/password', async () => {
       const res = await request(app)
@@ -88,18 +93,91 @@ describe('clientes', () => {
       expect(bcryptMock.hash).not.toHaveBeenCalled();
     });
 
+    it('400 si falta condicion_fiscal', async () => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({ nombre: 'X', email: 'x@y.com', password: '12345678', cuit: CUIT_VALIDO });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'condicion_fiscal inválida' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si condicion_fiscal inválida', async () => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'otra_cosa',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'condicion_fiscal inválida' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si falta cuit', async () => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          condicion_fiscal: 'monotributista',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'CUIT inválido' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it.each([
+      ['largo inválido', '20-1111111-2'],
+      ['dígito verificador inválido', '20-11111111-1'],
+    ])('400 si cuit inválido: %s', async (_caso, badCuit) => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          condicion_fiscal: 'monotributista',
+          cuit: badCuit,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'CUIT inválido' });
+      expect(sb.calls).toHaveLength(0);
+      expect(bcryptMock.hash).not.toHaveBeenCalled();
+    });
+
     it('409 si email ya existe', async () => {
       sb.queue([{ table: 'users', result: { data: { id: 'otro' }, error: null } }]);
       const res = await request(app)
         .post('/api/clientes')
         .set('Authorization', authA)
-        .send({ nombre: 'X', email: 'x@y.com', password: '12345678' });
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          condicion_fiscal: 'monotributista',
+          cuit: CUIT_VALIDO,
+        });
       expect(res.status).toBe(409);
       expect(bcryptMock.hash).not.toHaveBeenCalled();
     });
 
-    it('201 + insert con estudio_id del JWT (no del body)', async () => {
-      const created = makeUser({ role: 'cliente', estudio_id: 'estudio-A' });
+    it('201 persiste condicion_fiscal + categoria + cuit normalizado, estudio_id del JWT (no del body)', async () => {
+      const created = makeUser({
+        role: 'cliente',
+        estudio_id: 'estudio-A',
+        condicion_fiscal: 'responsable_inscripto',
+        categoria: 'A',
+        cuit: CUIT_VALIDO_NORM,
+      });
       sb.queue([
         { table: 'users', result: { data: null, error: null } },
         { table: 'users', result: { data: created, error: null } },
@@ -113,7 +191,9 @@ describe('clientes', () => {
           nombre: 'Cliente Nuevo',
           email: 'cn@y.com',
           password: '12345678',
-          cuit: '20-11111111-1',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'responsable_inscripto',
+          categoria: 'A',
           telefono: '+541112345678',
           // Intento de inyectar estudio_id ajeno: debe ignorarse.
           estudio_id: 'estudio-OTRO',
@@ -127,7 +207,9 @@ describe('clientes', () => {
         nombre: 'Cliente Nuevo',
         email: 'cn@y.com',
         password_hash: 'hashed',
-        cuit: '20-11111111-1',
+        cuit: CUIT_VALIDO_NORM, // normalizado a 11 dígitos
+        condicion_fiscal: 'responsable_inscripto',
+        categoria: 'A',
         telefono: '+541112345678',
         role: 'cliente',
         estudio_id: 'estudio-A', // del JWT, no del body
@@ -136,7 +218,7 @@ describe('clientes', () => {
       expect(insertCall.payload).not.toHaveProperty('password');
     });
 
-    it('201 con cuit/telefono null si no enviados', async () => {
+    it('201 con categoria/telefono null si no enviados', async () => {
       const created = makeUser({ role: 'cliente', estudio_id: 'estudio-A' });
       sb.queue([
         { table: 'users', result: { data: null, error: null } },
@@ -146,9 +228,15 @@ describe('clientes', () => {
       const res = await request(app)
         .post('/api/clientes')
         .set('Authorization', authA)
-        .send({ nombre: 'X', email: 'x@y.com', password: '12345678' });
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          condicion_fiscal: 'monotributista',
+          cuit: CUIT_VALIDO,
+        });
       expect(res.status).toBe(201);
-      expect(sb.calls[1].payload).toMatchObject({ cuit: null, telefono: null });
+      expect(sb.calls[1].payload).toMatchObject({ categoria: null, telefono: null });
     });
   });
 
@@ -244,8 +332,8 @@ describe('clientes', () => {
       expect(res.status).toBe(409);
     });
 
-    it('200 actualiza nombre + cuit + telefono', async () => {
-      const updated = { ...cliente, nombre: 'Nuevo', cuit: '30-1', telefono: '+54' };
+    it('200 actualiza nombre + cuit (normalizado) + telefono', async () => {
+      const updated = { ...cliente, nombre: 'Nuevo', cuit: CUIT_VALIDO_NORM, telefono: '+54' };
       sb.queue([
         { table: 'users', result: { data: { id: cliente.id }, error: null } },
         { table: 'users', result: { data: updated, error: null } },
@@ -253,11 +341,53 @@ describe('clientes', () => {
       const res = await request(app)
         .patch(`/api/clientes/${cliente.id}`)
         .set('Authorization', authA)
-        .send({ nombre: 'Nuevo', cuit: '30-1', telefono: '+54' });
+        .send({ nombre: 'Nuevo', cuit: CUIT_VALIDO, telefono: '+54' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual(updated);
       expect(sb.calls[1].op).toBe('update');
-      expect(sb.calls[1].payload).toEqual({ nombre: 'Nuevo', cuit: '30-1', telefono: '+54' });
+      expect(sb.calls[1].payload).toEqual({
+        nombre: 'Nuevo',
+        cuit: CUIT_VALIDO_NORM,
+        telefono: '+54',
+      });
+    });
+
+    it('200 edita condicion_fiscal + categoria', async () => {
+      const updated = { ...cliente, condicion_fiscal: 'responsable_inscripto', categoria: 'B' };
+      sb.queue([
+        { table: 'users', result: { data: { id: cliente.id }, error: null } },
+        { table: 'users', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ condicion_fiscal: 'responsable_inscripto', categoria: 'B' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(updated);
+      expect(sb.calls[1].payload).toEqual({
+        condicion_fiscal: 'responsable_inscripto',
+        categoria: 'B',
+      });
+    });
+
+    it('400 si condicion_fiscal inválida al editar (no llega a DB)', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ condicion_fiscal: 'otra_cosa' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'condicion_fiscal inválida' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si cuit inválido al editar (no llega a DB)', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ cuit: '20-11111111-1' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'CUIT inválido' });
+      expect(sb.calls).toHaveLength(0);
     });
   });
 

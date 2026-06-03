@@ -169,6 +169,8 @@ describe('POST /api/auth/login', () => {
       email: user.email,
       role: user.role,
       cuit: user.cuit,
+      condicion_fiscal: user.condicion_fiscal,
+      categoria: user.categoria,
       telefono: user.telefono,
       activo: user.activo,
       created_at: user.created_at,

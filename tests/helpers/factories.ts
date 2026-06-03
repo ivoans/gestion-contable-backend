@@ -15,6 +15,8 @@ export function makeUser(overrides: Partial<User> = {}): User {
     email: `${id}@test.local`,
     role,
     cuit: null,
+    condicion_fiscal: null,
+    categoria: null,
     telefono: null,
     activo: true,
     created_at: new Date().toISOString(),
