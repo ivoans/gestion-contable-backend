@@ -657,9 +657,10 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   |---|---|---|
   | 404 | Impuesto no existe en el estudio | `{ "error": "Impuesto no encontrado" }` |
   | 400 | Impuesto ya está `pagado` | `{ "error": "El impuesto ya está pagado" }` |
+  | 400 | Impuesto está en `borrador` | `{ "error": "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente" }` |
   | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
 
-  > La única transición que produce este endpoint es `→ pagado`. Funciona tanto desde `pendiente` como desde `vencido`. Sobre un `borrador` el endpoint **no** lo bloquea, pero como tiene `monto = null` el update viola `chk_monto_por_estado` ⇒ **500**: primero hay que completarle el monto (lo lleva a `pendiente`).
+  > La única transición que produce este endpoint es `→ pagado`. Funciona tanto desde `pendiente` como desde `vencido`. Sobre un `borrador` se rechaza con **400** `{ "error": "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente" }` (guard antes de tocar la DB): un borrador solo pasa a `pendiente` vía `PATCH /:id` al cargarle el monto.
 
 ---
 
@@ -859,7 +860,7 @@ Calendario impositivo que carga el contador. El backend almacena/devuelve por d�
 - El orden de evaluación de errores (400 "sin campos" vs 404 "no existe") difiere entre `PATCH contadores/:id` y `PATCH clientes/:id`.
 - Los `borrador` los ve **solo el contador**: aparecen en `GET /api/impuestos` (sin filtro) pero `GET /api/impuestos?estado=borrador` devuelve **400** y `/mis-impuestos` los excluye. Nunca vencen (el cron solo mira `pendiente`).
 - `POST /api/impuestos/generar` es **idempotente** y **no** envía emails; saltea clientes sin `condicion_fiscal` o con CUIT inválido reportándolos en la respuesta (no falla).
-- Marcar un `borrador` como pagado vía `PATCH /:id/estado` no está bloqueado por el endpoint, pero como el borrador tiene `monto = null` viola `chk_monto_por_estado` ⇒ **500**. Para pagarlo hay que completarle el monto antes (lo pasa a `pendiente`). **(verificar)**
+- `PATCH /:id/estado` sobre un `borrador` se rechaza con **400 controlado** (guard antes de la DB; mensaje "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente"). Para pagarlo hay que completarle el monto antes vía `PATCH /:id` (lo pasa a `pendiente`).
 
 ---
 

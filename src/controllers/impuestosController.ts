@@ -308,8 +308,20 @@ export async function cambiarEstadoImpuesto(req: Request, res: Response): Promis
       return;
     }
 
-    if ((existing as { id: string; estado: EstadoImpuesto }).estado === 'pagado') {
+    const estadoActual = (existing as { id: string; estado: EstadoImpuesto }).estado;
+
+    if (estadoActual === 'pagado') {
       res.status(400).json({ error: 'El impuesto ya está pagado' });
+      return;
+    }
+
+    // Un borrador (monto null) no puede ir directo a 'pagado': violaría
+    // chk_monto_por_estado en la DB (500). Solo pasa a 'pendiente' vía PATCH /:id
+    // al cargarle el monto. Rechazamos acá, antes de tocar la base.
+    if (estadoActual === 'borrador') {
+      res.status(400).json({
+        error: 'Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente',
+      });
       return;
     }
 

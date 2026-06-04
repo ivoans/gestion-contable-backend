@@ -469,6 +469,20 @@ describe('impuestos', () => {
       expect(res.body.error).toMatch(/pagado/);
     });
 
+    it('400 si es borrador (guard antes de la DB, no 500)', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/estado')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/borrador/);
+      // No hizo el update: solo la query de lectura.
+      expect(sb.calls).toHaveLength(1);
+    });
+
     it('200 transiciona pendiente → pagado con pagado_at + pagado_por', async () => {
       const updated = makeImpuesto({ estado: 'pagado' });
       sb.queue([
