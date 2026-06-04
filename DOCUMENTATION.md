@@ -397,11 +397,12 @@ Todo el router aplica `authenticate` + `requireRole('contador')`. Las queries fi
 #### Endpoints de contador — `requireRole('contador')`
 
 ##### `POST /api/impuestos`
-- Body: `cliente_id*`, `tipo*` (≤100 chars), `monto*` (número > 0), `fecha_vencimiento*` (`YYYY-MM-DD`), `descripcion?`.
+- Body: `cliente_id*`, `tipo*` (≤100 chars), `monto*` (número > 0), `fecha_vencimiento*` (`YYYY-MM-DD`), `descripcion?`, `vep?`.
 - Validaciones:
   - `cliente_id` debe existir, ser `role='cliente'` y pertenecer al estudio del contador.
   - `monto` finito y positivo.
   - `fecha_vencimiento` regex `^\d{4}-\d{2}-\d{2}$` + `Date.parse` válido.
+  - `vep` (si viene) string ≤100 chars, se trimea; `""` → `null`.
 - Inserta con `estado='pendiente'`, `creado_por = req.user.id`.
 - **Side effect (no fatal)**: dispara `sendNuevoImpuesto` al email del cliente y registra en `notificaciones` con `tipo='nuevo'`. Si falla, loguea pero responde 201.
 - 201 → impuesto creado · 400 validaciones · 404 cliente no encontrado.

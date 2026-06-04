@@ -158,11 +158,11 @@ Login endpoint vía Supertest. Mock de Supabase + bcrypt + loginLimiter pass-thr
 
 **PATCH /clientes/:id/estado** (3): 400 si no boolean, 404 cross-estudio, 200 toggle.
 
-### `tests/impuestos.test.ts` — 38 tests
+### `tests/impuestos.test.ts` — 40 tests
 
-**POST /impuestos — auth + validators** (10): 401 sin token, 403 admin, 403 cliente, 400 faltan campos, 400 tipo>100, 400 monto=0, 400 monto<0, 400 monto no número, 400 fecha mal formato, 400 fecha mes 13.
+**POST /impuestos — auth + validators** (11): 401 sin token, 403 admin, 403 cliente, 400 faltan campos, 400 tipo>100, 400 monto=0, 400 monto<0, 400 monto no número, 400 fecha mal formato, 400 fecha mes 13, 400 vep>100.
 
-**POST /impuestos — flujo** (3): 404 cliente cross-estudio, 201 happy (insert con `estudio_id` + `creado_por` del JWT, email a cliente, notif insert con `tipo: 'nuevo', canal: 'email'`), 201 con `descripcion` null.
+**POST /impuestos — flujo** (4): 404 cliente cross-estudio, 201 happy (insert con `estudio_id` + `creado_por` del JWT, email a cliente, notif insert con `tipo: 'nuevo', canal: 'email'`), 201 con `descripcion`/`vep` null, 201 persiste `vep` trimeado.
 
 **POST /impuestos — email** (1): 201 aunque `sendNuevoImpuesto` rechace (notif **no** se inserta porque el send falla antes; impuesto creado igual).
 

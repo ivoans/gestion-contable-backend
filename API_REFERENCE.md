@@ -523,8 +523,9 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | `monto` | number | sí | `typeof number`, finito y `> 0` |
   | `fecha_vencimiento` | string | sí | formato exacto `YYYY-MM-DD` y fecha parseable. **No** se valida que sea futura. |
   | `descripcion` | string | no | default `null` |
+  | `vep` | string | no | si viene, debe ser string y ≤ 100 chars. Se **trimea**; `""` ⇒ `null`. Default `null`. |
 
-  > `estudio_id` y `creado_por` se toman del token. `estado` se fuerza a `pendiente` (este endpoint **nunca** crea borradores; `monto` es obligatorio). Los impuestos así creados son **manuales**: `obligacion` y `periodo` quedan `NULL`, y `vep` también. Para los generados automáticamente ver `POST /api/impuestos/generar`.
+  > `estudio_id` y `creado_por` se toman del token. `estado` se fuerza a `pendiente` (este endpoint **nunca** crea borradores; `monto` es obligatorio). Los impuestos así creados son **manuales**: `obligacion` y `periodo` quedan `NULL`. Para los generados automáticamente ver `POST /api/impuestos/generar`.
 
 - **Response 201:** objeto `Impuesto` completo.
 - **Responses de error:**
@@ -535,6 +536,8 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | 400 | `tipo` > 100 chars | `{ "error": "El tipo no puede superar 100 caracteres" }` |
   | 400 | `monto` no numérico / no finito / ≤ 0 | `{ "error": "monto debe ser un número positivo" }` |
   | 400 | `fecha_vencimiento` con formato inválido | `{ "error": "Fecha de vencimiento debe tener formato YYYY-MM-DD" }` |
+  | 400 | `vep` no es string | `{ "error": "vep debe ser un string" }` |
+  | 400 | `vep` > 100 chars (tras trim) | `{ "error": "vep no puede superar 100 caracteres" }` |
   | 404 | Cliente inexistente / de otro estudio / no es cliente | `{ "error": "Cliente no encontrado" }` |
   | 500 | Error de inserción | `{ "error": "Error interno del servidor" }` |
 

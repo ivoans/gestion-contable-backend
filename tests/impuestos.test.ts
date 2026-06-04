@@ -237,7 +237,32 @@ describe('impuestos', () => {
           fecha_vencimiento: '2030-01-15',
         });
       expect(res.status).toBe(201);
-      expect(sb.calls[1].payload).toMatchObject({ descripcion: null });
+      expect(sb.calls[1].payload).toMatchObject({ descripcion: null, vep: null });
+    });
+
+    it('400 si vep > 100 caracteres', async () => {
+      const res = await request(app)
+        .post('/api/impuestos')
+        .set('Authorization', authA)
+        .send({ ...validBody, vep: 'x'.repeat(101) });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('201 persiste vep (trimeado) si se envía', async () => {
+      const created = makeImpuesto({ cliente_id: clienteA.id, estudio_id: 'estudio-A', vep: '1234567890' });
+      sb.queue([
+        { table: 'users', result: { data: { id: clienteA.id }, error: null } },
+        { table: 'impuestos', result: { data: created, error: null } },
+        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
+        { table: 'notificaciones', result: { data: null, error: null } },
+      ]);
+      const res = await request(app)
+        .post('/api/impuestos')
+        .set('Authorization', authA)
+        .send({ ...validBody, vep: '  1234567890  ' });
+      expect(res.status).toBe(201);
+      expect(sb.calls[1].payload).toMatchObject({ vep: '1234567890' });
     });
   });
 

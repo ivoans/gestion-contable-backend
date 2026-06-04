@@ -5,12 +5,13 @@ import { sendNuevoImpuesto } from '../services/emailService';
 import { isValidCuit, normalizeCuit } from '../utils/validators';
 
 export async function crearImpuesto(req: Request, res: Response): Promise<void> {
-  const { cliente_id, tipo, monto, fecha_vencimiento, descripcion } = req.body as {
+  const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, vep } = req.body as {
     cliente_id?: string;
     tipo?: string;
     monto?: number;
     fecha_vencimiento?: string;
     descripcion?: string;
+    vep?: string;
   };
 
   if (!cliente_id || !tipo || monto === undefined || !fecha_vencimiento) {
@@ -31,6 +32,21 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento) || isNaN(Date.parse(fecha_vencimiento))) {
     res.status(400).json({ error: 'Fecha de vencimiento debe tener formato YYYY-MM-DD' });
     return;
+  }
+
+  // vep: string opcional. Trim; vacío → null. Largo acotado (igual que en PATCH).
+  let vepNormalizado: string | null = null;
+  if (vep !== undefined) {
+    if (typeof vep !== 'string') {
+      res.status(400).json({ error: 'vep debe ser un string' });
+      return;
+    }
+    const trimmed = vep.trim();
+    if (trimmed.length > 100) {
+      res.status(400).json({ error: 'vep no puede superar 100 caracteres' });
+      return;
+    }
+    vepNormalizado = trimmed === '' ? null : trimmed;
   }
 
   const estudio_id = req.user!.estudio_id;
@@ -64,6 +80,7 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
         monto,
         fecha_vencimiento,
         descripcion: descripcion ?? null,
+        vep: vepNormalizado,
         estado: 'pendiente',
       })
       .select('*')
