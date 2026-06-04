@@ -5,13 +5,13 @@ import { sendNuevoImpuesto } from '../services/emailService';
 import { isValidCuit, normalizeCuit } from '../utils/validators';
 
 export async function crearImpuesto(req: Request, res: Response): Promise<void> {
-  const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, link_pago } = req.body as {
+  const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, vep } = req.body as {
     cliente_id?: string;
     tipo?: string;
     monto?: number;
     fecha_vencimiento?: string;
     descripcion?: string;
-    link_pago?: string;
+    vep?: string;
   };
 
   if (!cliente_id || !tipo || monto === undefined || !fecha_vencimiento) {
@@ -34,9 +34,19 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
     return;
   }
 
-  if (link_pago !== undefined && !/^https:\/\//i.test(link_pago)) {
-    res.status(400).json({ error: 'link_pago debe ser una URL HTTPS válida' });
-    return;
+  // vep: string opcional. Trim; vacío → null. Largo acotado (igual que en PATCH).
+  let vepNormalizado: string | null = null;
+  if (vep !== undefined) {
+    if (typeof vep !== 'string') {
+      res.status(400).json({ error: 'vep debe ser un string' });
+      return;
+    }
+    const trimmed = vep.trim();
+    if (trimmed.length > 100) {
+      res.status(400).json({ error: 'vep no puede superar 100 caracteres' });
+      return;
+    }
+    vepNormalizado = trimmed === '' ? null : trimmed;
   }
 
   const estudio_id = req.user!.estudio_id;
@@ -70,7 +80,7 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
         monto,
         fecha_vencimiento,
         descripcion: descripcion ?? null,
-        link_pago: link_pago ?? null,
+        vep: vepNormalizado,
         estado: 'pendiente',
       })
       .select('*')
@@ -96,7 +106,6 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
           tipo: nuevoImpuesto.tipo,
           monto: nuevoImpuesto.monto,
           fecha_vencimiento: nuevoImpuesto.fecha_vencimiento,
-          link_pago: nuevoImpuesto.link_pago ?? undefined,
         });
 
         await supabase.from('notificaciones').insert({
@@ -181,12 +190,11 @@ export async function obtenerImpuesto(req: Request, res: Response): Promise<void
 export async function actualizarImpuesto(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const estudio_id = req.user!.estudio_id;
-  const { tipo, monto, fecha_vencimiento, descripcion, link_pago, vep } = req.body as {
+  const { tipo, monto, fecha_vencimiento, descripcion, vep } = req.body as {
     tipo?: string;
     monto?: number;
     fecha_vencimiento?: string;
     descripcion?: string;
-    link_pago?: string;
     vep?: string;
   };
 
@@ -197,11 +205,6 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
 
   if (monto !== undefined && (typeof monto !== 'number' || !Number.isFinite(monto) || monto <= 0)) {
     res.status(400).json({ error: 'monto debe ser un número positivo' });
-    return;
-  }
-
-  if (link_pago !== undefined && !/^https:\/\//i.test(link_pago)) {
-    res.status(400).json({ error: 'link_pago debe ser una URL HTTPS válida' });
     return;
   }
 
@@ -225,7 +228,6 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
   if (monto !== undefined) updates.monto = monto;
   if (fecha_vencimiento !== undefined) updates.fecha_vencimiento = fecha_vencimiento;
   if (descripcion !== undefined) updates.descripcion = descripcion;
-  if (link_pago !== undefined) updates.link_pago = link_pago;
   if (vepNormalizado !== undefined) updates.vep = vepNormalizado;
 
   if (Object.keys(updates).length === 0) {

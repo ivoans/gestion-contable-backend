@@ -17,11 +17,6 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function safeHref(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  return /^https:\/\//i.test(url) ? url : undefined;
-}
-
 function formatFecha(fecha: string): string {
   const [y, m, d] = fecha.split('-');
   return `${d}/${m}/${y}`;
@@ -38,7 +33,6 @@ export async function sendNuevoImpuesto(
     tipo: string;
     monto: number;
     fecha_vencimiento: string;
-    link_pago?: string;
   }
 ): Promise<void> {
   if (!emailsEnabled()) {
@@ -50,11 +44,6 @@ export async function sendNuevoImpuesto(
   const montoFormateado = formatMonto(data.monto);
   const nombre = escapeHtml(data.nombre);
   const tipo = escapeHtml(data.tipo);
-
-  const safeLink = safeHref(data.link_pago);
-  const linkPagoHtml = safeLink
-    ? `<p style="margin-top:24px"><a href="${safeLink}" style="background:#2563eb;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:600">Pagar ahora</a></p>`
-    : '';
 
   try {
     await resend.emails.send({
@@ -80,7 +69,6 @@ export async function sendNuevoImpuesto(
               <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${fechaFormateada}</td>
             </tr>
           </table>
-          ${linkPagoHtml}
           <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
         </div>
       `,
