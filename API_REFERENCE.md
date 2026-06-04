@@ -52,7 +52,7 @@ Tres roles (enum `role`):
 | Rol | `estudio_id` | Qué puede hacer |
 |---|---|---|
 | **admin** | siempre `NULL` | ABM de **contadores** (crear, listar, ver, editar, activar/desactivar). Es global, no pertenece a ningún estudio. **No** accede a clientes ni impuestos. |
-| **contador** | obligatorio | ABM de **clientes** de su estudio + ABM de **impuestos** de su estudio (crear, listar, ver, editar, marcar pagado, cambiar contraseña de cliente). Todo acotado a su `estudio_id`. |
+| **contador** | obligatorio | ABM de **clientes** de su estudio + ABM de **impuestos** de su estudio (crear, generar borradores automáticos, listar, ver, editar, marcar pagado, cambiar contraseña de cliente) + ABM del **calendario de vencimientos**. Todo acotado a su `estudio_id`. |
 | **cliente** | obligatorio | Solo lectura de **sus propios** impuestos (`/mis-impuestos`, `/mis-impuestos/:id`). |
 
 - Cada rol está limitado a sus rutas vía `requireRole(...)`. Un rol que pega a una ruta de otro recibe **403** `Sin permiso para esta acción`.
@@ -69,8 +69,10 @@ Fuente: `src/database/schema.sql`. Extensión `uuid-ossp`; todos los IDs son UUI
 | Enum | Valores |
 |---|---|
 | `role` | `admin`, `contador`, `cliente` |
-| `estado_impuesto` | `pendiente`, `vencido`, `pagado` |
+| `estado_impuesto` | `pendiente`, `vencido`, `pagado`, `borrador` |
 | `tipo_notificacion` | `nuevo`, `recordatorio_3dias`, `vencido` |
+| `condicion_fiscal` | `monotributista`, `responsable_inscripto` |
+| `obligacion` | `monotributo`, `iva`, `autonomos`, `ingresos_brutos` |
 
 ### Tabla `estudios`
 
@@ -91,8 +93,10 @@ Fuente: `src/database/schema.sql`. Extensión `uuid-ossp`; todos los IDs son UUI
 | `email` | VARCHAR(255) | NOT NULL, **UNIQUE** |
 | `password_hash` | VARCHAR(255) | NOT NULL. **Nunca se devuelve en respuestas.** |
 | `role` | `role` | NOT NULL |
-| `cuit` | VARCHAR(13) | nullable. Sin validación de formato en el backend. |
+| `cuit` | VARCHAR(13) | nullable en la columna. **Para clientes creados/editados vía API el backend lo exige y valida** (11 dígitos + dígito verificador módulo 11). Admin/contador sembrados en DB pueden tenerlo `null`. |
 | `telefono` | VARCHAR(20) | nullable. Sin validación de formato en el backend. |
+| `condicion_fiscal` | `condicion_fiscal` | nullable. `monotributista` o `responsable_inscripto`. `NULL` para admin/contador o cliente sin clasificar. |
+| `categoria` | VARCHAR | nullable. Letra del monotributo; **solo referencia**, sin validación ni uso en la lógica. |
 | `activo` | BOOLEAN | NOT NULL, default `true` |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` |
 
@@ -107,12 +111,14 @@ Fuente: `src/database/schema.sql`. Extensión `uuid-ossp`; todos los IDs son UUI
   "email": "string",
   "role": "admin|contador|cliente",
   "cuit": "string|null",
+  "condicion_fiscal": "monotributista|responsable_inscripto|null",
+  "categoria": "string|null",
   "telefono": "string|null",
   "activo": true,
   "created_at": "ISO-8601"
 }
 ```
-> Excepción: el objeto `user` del **login** trae un subconjunto distinto (`id, nombre, email, role, estudio_id`) — ver endpoint de login.
+> El objeto `user` del **login** ahora devuelve **este mismo shape completo** (todas las columnas menos `password_hash`); ya **no** es un subconjunto. Para admin/contador `condicion_fiscal` y `categoria` son `null`. Ver endpoint de login.
 
 ### Tabla `impuestos`
 
@@ -123,19 +129,41 @@ Fuente: `src/database/schema.sql`. Extensión `uuid-ossp`; todos los IDs son UUI
 | `cliente_id` | UUID | NOT NULL, FK → `users(id)` RESTRICT |
 | `creado_por` | UUID | NOT NULL, FK → `users(id)` RESTRICT (el contador que lo creó) |
 | `tipo` | VARCHAR(100) | NOT NULL |
-| `monto` | DECIMAL(12,2) | NOT NULL, CHECK `monto > 0` |
+| `monto` | DECIMAL(12,2) | **nullable** (ver `chk_monto_por_estado`). Un borrador puede tener `monto NULL`; en cualquier otro estado es obligatorio y `> 0`. |
 | `fecha_vencimiento` | DATE | NOT NULL. Formato `YYYY-MM-DD`. |
 | `descripcion` | TEXT | nullable |
 | `link_pago` | VARCHAR(500) | nullable |
+| `vep` | VARCHAR | nullable. Código VEP del pago (se carga vía `PATCH /:id`). |
+| `obligacion` | `obligacion` | nullable. Seteada por la generación automática; `NULL` = impuesto **manual** (creado por `POST /api/impuestos`). |
+| `periodo` | DATE | nullable. Primer día del mes declarado (`YYYY-MM-01`) en los generados; `NULL` = manual. |
 | `estado` | `estado_impuesto` | NOT NULL, default `pendiente` |
 | `pagado_at` | TIMESTAMPTZ | nullable |
 | `pagado_por` | UUID | nullable, FK → `users(id)` RESTRICT |
 | `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` |
 | `updated_at` | TIMESTAMPTZ | NOT NULL, default `NOW()`. Trigger `trg_impuestos_updated_at` lo actualiza en cada UPDATE. |
 
+- **Constraint `chk_monto_por_estado`:** si `estado <> 'borrador'` ⇒ `monto IS NOT NULL AND monto > 0`; si `estado = 'borrador'` ⇒ `monto` puede ser `NULL`.
 - **Constraint `chk_pagado_completo`:** `estado = 'pagado'` ⇒ `pagado_at` y `pagado_por` NOT NULL; `estado != 'pagado'` ⇒ ambos NULL.
-- **Shape de respuesta:** `select('*')` → devuelve **todas** las columnas de arriba.
-- **(verificar)** `monto` se tipa como `number` en TypeScript. PostgREST/Supabase puede serializar `DECIMAL` como número o como string según configuración; confirmar contra lo que parsea el frontend.
+- **Índice único `uq_impuestos_obligacion_periodo` `(cliente_id, obligacion, periodo)`:** anti-duplicado de la generación automática. Es `NULLS DISTINCT` (default), así los impuestos manuales (`obligacion`/`periodo` `NULL`) **no** colisionan y un cliente puede tener muchos.
+- **Shape de respuesta:** `select('*')` → devuelve **todas** las columnas de arriba (incluidas `vep`, `obligacion`, `periodo`).
+- **(verificar)** `monto` se tipa como `number` (no nullable) en la interfaz `Impuesto` de TypeScript, pero la DB lo permite `NULL` en borradores → la respuesta real puede traer `monto: null`. Además PostgREST/Supabase puede serializar `DECIMAL` como número o string según configuración; confirmar contra lo que parsea el frontend. Las columnas `obligacion` y `periodo` viajan en el JSON (`select('*')`) aunque **no** estén en la interfaz `Impuesto`.
+
+### Tabla `vencimientos`
+
+Calendario impositivo que carga el contador. Endpoints en sección 3.6.
+
+| Columna | Tipo | Constraints |
+|---|---|---|
+| `id` | UUID | PK |
+| `estudio_id` | UUID | NOT NULL, FK → `estudios(id)` RESTRICT |
+| `obligacion` | `obligacion` | NOT NULL |
+| `terminacion_cuit` | SMALLINT | nullable, CHECK `0–9`. `NULL` = "todos" (no se discrimina por último dígito). |
+| `anio` | INT | NOT NULL |
+| `mes` | SMALLINT | NOT NULL, CHECK `1–12` |
+| `fecha_vencimiento` | DATE | NOT NULL. Formato `YYYY-MM-DD`. |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `NOW()` |
+
+- **Constraint `uq_vencimientos`** `UNIQUE NULLS NOT DISTINCT (estudio_id, obligacion, terminacion_cuit, anio, mes)`: en PG15+ la fila "todos" (`terminacion_cuit NULL`) tampoco se duplica (clave para la idempotencia del `PUT`).
 
 ### Tabla `notificaciones`
 
@@ -155,6 +183,7 @@ Fuente: `src/database/schema.sql`. Extensión `uuid-ossp`; todos los IDs son UUI
 ```
 estudios 1──N users        (users.estudio_id → estudios.id)
 estudios 1──N impuestos     (impuestos.estudio_id → estudios.id)
+estudios 1──N vencimientos  (vencimientos.estudio_id → estudios.id)
 users    1──N impuestos     (impuestos.cliente_id → users.id)   [el cliente]
 users    1──N impuestos     (impuestos.creado_por → users.id)   [el contador]
 users    1──N impuestos     (impuestos.pagado_por → users.id)   [quien marcó pagado]
@@ -166,17 +195,23 @@ Todas las FK hacia `estudios`/`users` son `ON DELETE RESTRICT` (no se puede borr
 
 ### Estados de impuesto y transiciones
 
-Estados: `pendiente` (default) · `vencido` · `pagado`.
+Estados: `borrador` · `pendiente` (default) · `vencido` · `pagado`.
+
+Ciclo de vida típico de un impuesto generado: **`borrador`** (sin monto, lo crea la generación automática) **→** (el contador le carga un `monto` válido) **`pendiente`** **→** `vencido` (cron) / `pagado`. Los impuestos manuales (`POST /api/impuestos`) nacen directamente en `pendiente`.
 
 | Transición | Cómo ocurre | Disparador |
 |---|---|---|
+| `(alta) → borrador` | `POST /api/impuestos/generar` (con `monto NULL`) | contador |
+| `borrador → pendiente` | `PATCH /api/impuestos/:id` cuando el impuesto queda con `monto` válido (`> 0`) | contador |
 | `pendiente → pagado` | `PATCH /api/impuestos/:id/estado` | contador |
 | `vencido → pagado` | `PATCH /api/impuestos/:id/estado` | contador (permitido: el endpoint solo bloquea si ya está `pagado`) |
 | `pendiente → vencido` | Cron `procesarVencidos` cuando `fecha_vencimiento < hoy (ART)` | **solo el cron** |
 
+- Un `borrador` **es editable** (`PATCH /:id`) y se completa cargándole datos. Mientras siga sin `monto > 0`, permanece en `borrador` (no se puede forzar `pendiente` sin monto: lo impide `chk_monto_por_estado`).
 - `pagado` es **terminal**: no se puede editar (`PATCH /:id` → 400) ni volver a marcar pagado (`PATCH /:id/estado` → 400).
-- **No existe** transición `vencido → pendiente` ni `pagado → *` por ningún endpoint ni el cron.
+- **No existe** transición `pendiente/vencido → borrador`, `vencido → pendiente` ni `pagado → *` por ningún endpoint ni el cron.
 - Editar un impuesto `vencido` está permitido (solo se bloquea `pagado`) y **no resetea el estado** aunque se mueva la fecha al futuro. Ver sección 4 (comportamiento no obvio).
+- El cron (`procesarVencidos`) solo mira `estado = 'pendiente'`, así que **un `borrador` nunca vence** por más que pase su `fecha_vencimiento`.
 
 ---
 
@@ -229,14 +264,20 @@ Notas transversales:
     "expires_at": "2026-06-01T20:00:00.000Z",
     "user": {
       "id": "uuid",
+      "estudio_id": "uuid|null",
       "nombre": "string",
       "email": "string",
       "role": "admin|contador|cliente",
-      "estudio_id": "uuid|null"
+      "cuit": "string|null",
+      "telefono": "string|null",
+      "condicion_fiscal": "monotributista|responsable_inscripto|null",
+      "categoria": "string|null",
+      "activo": true,
+      "created_at": "ISO-8601"
     }
   }
   ```
-  > Nota: el `user` del login **no** incluye `cuit`, `telefono`, `activo` ni `created_at` (shape distinto al `User` de los demás endpoints).
+  > Nota: el `user` del login devuelve el **objeto `User` completo** — todas las columnas de la fila menos `password_hash` (el login hace `select('*')` y descarta el hash). Antes era un subconjunto; ahora coincide con el `User` de los demás endpoints e incluye `condicion_fiscal`/`categoria` (`null` para admin/contador). El orden de claves sigue el de columnas de la tabla.
 
 - **Responses de error:**
 
@@ -351,21 +392,27 @@ Todas requieren `Authorization: Bearer` + rol **contador** (`router.use(authenti
   | `nombre` | string | sí | presencia |
   | `email` | string | sí | presencia + `isValidEmail` |
   | `password` | string | sí | longitud ≥ 8 |
-  | `cuit` | string | no | sin validación de formato; default `null` |
+  | `condicion_fiscal` | string | **sí** | debe ser `monotributista` o `responsable_inscripto` |
+  | `cuit` | string | **sí** | 11 dígitos + dígito verificador (módulo 11). Acepta separadores (espacios, `.`, `-`); se **normaliza** a 11 dígitos antes de guardar. |
+  | `categoria` | string | no | sin validación; default `null`. Letra del monotributo (solo referencia). |
   | `telefono` | string | no | sin validación de formato; default `null` |
 
-  > `role` se fuerza a `cliente`, `estudio_id` se toma del token, `activo` = `true`.
+  > `role` se fuerza a `cliente`, `estudio_id` se toma del token, `activo` = `true`. `cuit` se guarda **normalizado** (solo dígitos).
 
-- **Response 201:** objeto `User`.
-- **Responses de error:**
+- **Response 201:** objeto `User` (incluye `condicion_fiscal` y `categoria`).
+- **Responses de error (en orden de evaluación):**
 
   | Status | Caso | Body |
   |---|---|---|
   | 400 | Falta `nombre`, `email` o `password` | `{ "error": "nombre, email y password son requeridos" }` |
   | 400 | Email inválido | `{ "error": "Email inválido" }` |
   | 400 | Password < 8 | `{ "error": "La contraseña debe tener al menos 8 caracteres" }` |
+  | 400 | `condicion_fiscal` ausente o con valor inválido | `{ "error": "condicion_fiscal inválida" }` |
+  | 400 | `cuit` ausente o inválido (formato/dígito verificador) | `{ "error": "CUIT inválido" }` |
   | 409 | Email ya registrado (global, en cualquier estudio) | `{ "error": "Email ya registrado" }` |
   | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+  > Ojo: `condicion_fiscal` y `cuit` son obligatorios pero **no** figuran en el mensaje `"nombre, email y password son requeridos"`; si faltan, el rechazo llega por su validación específica (`"condicion_fiscal inválida"` / `"CUIT inválido"`).
 
 #### `GET /api/clientes/:id`
 - **Obtiene un cliente del estudio por id.**
@@ -380,7 +427,9 @@ Todas requieren `Authorization: Bearer` + rol **contador** (`router.use(authenti
   |---|---|---|
   | `nombre` | string | — |
   | `email` | string | si viene, `isValidEmail` + único |
-  | `cuit` | string | — |
+  | `condicion_fiscal` | string | si viene, `monotributista` o `responsable_inscripto` |
+  | `cuit` | string | si viene, 11 dígitos + dígito verificador (módulo 11); se normaliza antes de guardar |
+  | `categoria` | string\|null | — (acepta `null` para limpiarlo) |
   | `telefono` | string | — |
 
 - **Response 200:** `User` actualizado.
@@ -389,6 +438,8 @@ Todas requieren `Authorization: Bearer` + rol **contador** (`router.use(authenti
   | Status | Caso | Body |
   |---|---|---|
   | 400 | `email` presente e inválido | `{ "error": "Email inválido" }` |
+  | 400 | `condicion_fiscal` presente e inválida | `{ "error": "condicion_fiscal inválida" }` |
+  | 400 | `cuit` presente e inválido | `{ "error": "CUIT inválido" }` |
   | 400 | No se envió ningún campo | `{ "error": "No se enviaron campos para actualizar" }` |
   | 404 | Cliente no existe en el estudio | `{ "error": "Cliente no encontrado" }` |
   | 409 | `email` ya usado por otro user | `{ "error": "Email ya registrado" }` |
@@ -443,7 +494,7 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
 
 #### `GET /api/impuestos/mis-impuestos`
 - **Rol:** cliente.
-- **Lista los impuestos del cliente logueado**, filtrados por `cliente_id = req.user.id` + `estudio_id` del token, agrupados por estado.
+- **Lista los impuestos del cliente logueado**, filtrados por `cliente_id = req.user.id` + `estudio_id` del token, agrupados por estado. **Excluye los `borrador`** (el cliente no ve los borradores): la query hace `.neq('estado', 'borrador')`.
 - **Response 200** (objeto, **no** array):
   ```json
   {
@@ -452,7 +503,7 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
     "pagados":    [ /* Impuesto[] */ ]
   }
   ```
-  > Cada grupo está ordenado por `fecha_vencimiento` asc (orden global previo al split).
+  > Cada grupo está ordenado por `fecha_vencimiento` asc (orden global previo al split). No hay grupo de borradores: nunca se devuelven al cliente.
 - **Errores:** 500.
 
 #### `GET /api/impuestos/mis-impuestos/:id`
@@ -475,7 +526,7 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | `descripcion` | string | no | default `null` |
   | `link_pago` | string | no | si viene, debe empezar con `https://` (case-insensitive) |
 
-  > `estudio_id` y `creado_por` se toman del token. `estado` se fuerza a `pendiente`.
+  > `estudio_id` y `creado_por` se toman del token. `estado` se fuerza a `pendiente` (este endpoint **nunca** crea borradores; `monto` es obligatorio). Los impuestos así creados son **manuales**: `obligacion` y `periodo` quedan `NULL`, y `vep` también. Para los generados automáticamente ver `POST /api/impuestos/generar`.
 
 - **Response 201:** objeto `Impuesto` completo.
 - **Responses de error:**
@@ -492,6 +543,54 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
 
   > **Efecto secundario:** tras crear, intenta enviar email `sendNuevoImpuesto` al cliente y registra una notificación `tipo = 'nuevo'`. Si el email falla, se loguea pero **la request igual responde 201** (no rompe). El envío real depende de `EMAILS_ENABLED` (sección 4).
 
+#### `POST /api/impuestos/generar`
+- **Rol:** contador.
+- **Genera en lote los impuestos mensuales en estado `borrador`** para los clientes del estudio, según su `condicion_fiscal` y el calendario de `vencimientos`. Cada borrador nace **sin `monto`** (`monto = null`); el contador luego le carga el importe con `PATCH /:id` (lo que lo pasa a `pendiente`).
+- **Request body:** (ambos opcionales)
+
+  | Campo | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `anio` | number | no | si viene, entero entre **2024 y 2100**. Si falta, usa el **año actual** del server. |
+  | `mes` | number | no | si viene, entero entre **1 y 12**. Si falta, usa el **mes actual** del server. |
+
+  > El `periodo` de los impuestos se arma como `YYYY-MM-01` a partir de `anio`/`mes`. El "actual" sale de `new Date()` del server (hora local del proceso, **no** ART). **(verificar)** la zona horaria del server si el default de `mes` es sensible al borde de mes.
+
+- **Qué genera (lógica):**
+  - Toma los clientes **activos** del estudio (`role = cliente`, `activo = true`).
+  - Obligaciones por condición fiscal: `monotributista` → `monotributo`, `ingresos_brutos`; `responsable_inscripto` → `iva`, `autonomos`, `ingresos_brutos`.
+  - La fecha de vencimiento de cada obligación sale del calendario (`vencimientos`) de ese `(anio, mes)`. Para `iva` y `autonomos` se busca por **último dígito del CUIT** (`terminacion_cuit`); el resto (`monotributo`, `ingresos_brutos`) se busca con `terminacion_cuit = null` ("todos").
+  - La columna `tipo` se guarda con etiqueta legible: `Monotributo`, `IVA`, `Autónomos`, `Ingresos Brutos`.
+  - **Idempotente:** upsert con `ON CONFLICT DO NOTHING` sobre `(cliente_id, obligacion, periodo)`. Correrlo dos veces para el mismo período no duplica; lo ya existente cuenta como `ya_existentes`.
+- **Se saltea / reporta (no crea, pero no es error):**
+  - Cliente sin `condicion_fiscal` → entra en `clientes_salteados` con `motivo: "Sin condición fiscal"`.
+  - Cliente con CUIT inválido (no pasa validación módulo 11) → `clientes_salteados` con `motivo: "CUIT inválido"`.
+  - Obligación sin fecha cargada en el calendario para ese `(anio, mes[, terminacion])` → entra en `obligaciones_sin_fecha` (no se crea ese impuesto).
+- **Response 200:**
+  ```json
+  {
+    "anio": 2026,
+    "mes": 6,
+    "creados": 12,
+    "ya_existentes": 3,
+    "clientes_salteados": [
+      { "cliente_id": "uuid", "nombre": "string", "motivo": "Sin condición fiscal" }
+    ],
+    "obligaciones_sin_fecha": [
+      { "cliente_id": "uuid", "nombre": "string", "obligacion": "iva" }
+    ]
+  }
+  ```
+  > `creados` = filas realmente insertadas; `ya_existentes` = filas que ya existían (candidatas menos creadas). Devuelve **200**, no 201.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `anio` no entero o fuera de 2024–2100 | `{ "error": "anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `mes` no entero o fuera de 1–12 | `{ "error": "mes debe ser un entero entre 1 y 12" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+  > **No** envía emails ni registra notificaciones (a diferencia de `POST /api/impuestos`): los borradores son internos del contador hasta que se completan.
+
 #### `GET /api/impuestos`
 - **Rol:** contador.
 - **Lista impuestos del estudio**, ordenados por `fecha_vencimiento` asc.
@@ -500,14 +599,14 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | Param | Tipo | Obligatorio | Validación |
   |---|---|---|---|
   | `cliente_id` | string (uuid) | no | filtra por cliente. Sin validación de formato (filtro directo). |
-  | `estado` | string | no | si viene, debe ser `pendiente`, `vencido` o `pagado` |
+  | `estado` | string | no | si viene, debe ser `pendiente`, `vencido` o `pagado` (**no** acepta `borrador`) |
 
-- **Response 200:** `Impuesto[]`.
+- **Response 200:** `Impuesto[]`. **Sin filtro `estado`, la lista incluye los `borrador`** (el contador sí los ve). Para aislarlos no hay valor de filtro: `estado=borrador` devuelve 400.
 - **Responses de error:**
 
   | Status | Caso | Body |
   |---|---|---|
-  | 400 | `estado` con valor inválido | `{ "error": "estado debe ser pendiente, vencido o pagado" }` |
+  | 400 | `estado` con valor inválido (incluye `borrador`) | `{ "error": "estado debe ser pendiente, vencido o pagado" }` |
   | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
 
 #### `GET /api/impuestos/:id`
@@ -518,7 +617,7 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
 
 #### `PATCH /api/impuestos/:id`
 - **Rol:** contador.
-- **Edita un impuesto del estudio** (mientras no esté `pagado`).
+- **Edita un impuesto del estudio** (mientras no esté `pagado`). También es el endpoint para **completar un borrador** (cargarle `monto`/`vep`).
 - **Request body:** (todos opcionales, al menos uno requerido)
 
   | Campo | Tipo | Validación |
@@ -528,6 +627,7 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | `fecha_vencimiento` | string | si viene, formato `YYYY-MM-DD` válido |
   | `descripcion` | string | — |
   | `link_pago` | string | si viene, debe empezar con `https://` |
+  | `vep` | string | si viene, debe ser string y ≤ 100 chars. Se **trimea**; string vacío `""` ⇒ guarda `null` (permite limpiarlo). |
 
 - **Response 200:** `Impuesto` actualizado.
 - **Responses de error (en orden de evaluación):**
@@ -537,12 +637,15 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | 400 | `fecha_vencimiento` formato inválido | `{ "error": "Fecha de vencimiento debe tener formato YYYY-MM-DD" }` |
   | 400 | `monto` inválido | `{ "error": "monto debe ser un número positivo" }` |
   | 400 | `link_pago` no HTTPS | `{ "error": "link_pago debe ser una URL HTTPS válida" }` |
+  | 400 | `vep` no es string | `{ "error": "vep debe ser un string" }` |
+  | 400 | `vep` > 100 chars (tras trim) | `{ "error": "vep no puede superar 100 caracteres" }` |
   | 400 | No se envió ningún campo | `{ "error": "No se enviaron campos para actualizar" }` |
   | 404 | Impuesto no existe en el estudio | `{ "error": "Impuesto no encontrado" }` |
   | 400 | Impuesto está `pagado` | `{ "error": "No se puede editar un impuesto pagado" }` |
   | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
 
-  > **Comportamiento no obvio:** un impuesto en estado `vencido` **sí** se puede editar, y editarlo **no** lo devuelve a `pendiente` aunque se mueva la fecha al futuro. Solo `pagado` bloquea la edición.
+  > **Completar borrador (transición automática):** si el impuesto está en `borrador` y tras el PATCH queda con `monto` válido (`> 0` — sea el del body o el ya guardado), el backend setea automáticamente `estado = 'pendiente'`. Si sigue sin `monto > 0`, permanece en `borrador` (forzar `pendiente` sin monto violaría `chk_monto_por_estado`). No hay forma de mandar `estado` explícito en el body.
+  > **Comportamiento no obvio:** un impuesto en estado `vencido` **sí** se puede editar, y editarlo **no** lo devuelve a `pendiente` aunque se mueva la fecha al futuro. Solo `pagado` bloquea la edición; los `borrador` son editables.
 
 #### `PATCH /api/impuestos/:id/estado`
 - **Rol:** contador.
@@ -554,9 +657,10 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   |---|---|---|
   | 404 | Impuesto no existe en el estudio | `{ "error": "Impuesto no encontrado" }` |
   | 400 | Impuesto ya está `pagado` | `{ "error": "El impuesto ya está pagado" }` |
+  | 400 | Impuesto está en `borrador` | `{ "error": "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente" }` |
   | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
 
-  > La única transición que produce este endpoint es `→ pagado`. Funciona tanto desde `pendiente` como desde `vencido`.
+  > La única transición que produce este endpoint es `→ pagado`. Funciona tanto desde `pendiente` como desde `vencido`. Sobre un `borrador` se rechaza con **400** `{ "error": "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente" }` (guard antes de tocar la DB): un borrador solo pasa a `pendiente` vía `PATCH /:id` al cargarle el monto.
 
 ---
 
@@ -584,6 +688,109 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
   | 403 | Secret no coincide | `{ "error": "Secret inválido" }` |
   | 400 | `job` con valor inválido | `{ "error": "job debe ser 'vencidos', 'recordatorios' o 'all'" }` |
   | 500 | Excepción durante la corrida | `{ "error": "Error interno del servidor" }` |
+
+---
+
+### 3.6 Vencimientos — `/api/vencimientos`
+
+Auth aplicada **por ruta** + rol **contador** (`authenticate, requireRole('contador')` en cada handler).
+**Multi-tenant:** todas las rutas filtran/escriben por `estudio_id` del token. El `estudio_id` del body, si viene, **se ignora**. Un recurso de otro estudio responde **404**.
+
+Calendario impositivo que carga el contador. El backend almacena/devuelve por dígito individual (`terminacion_cuit` 0–9) o `null` (= "todos"); **no** expande grupos (eso es del frontend).
+
+**Shape de `Vencimiento` que devuelven los endpoints** (campos `VENCIMIENTO_FIELDS`):
+```json
+{
+  "id": "uuid",
+  "estudio_id": "uuid",
+  "obligacion": "monotributo|iva|autonomos|ingresos_brutos",
+  "terminacion_cuit": 0,
+  "anio": 2026,
+  "mes": 6,
+  "fecha_vencimiento": "2026-06-15",
+  "created_at": "ISO-8601"
+}
+```
+> `terminacion_cuit` es `number (0–9)` o `null` (= "todos", p. ej. monotributo).
+
+#### `GET /api/vencimientos`
+- **Rol:** contador.
+- **Lista los vencimientos del estudio** para un año (y obligación si se filtra), ordenados por `obligacion` asc, `mes` asc, `terminacion_cuit` asc (nulls first).
+- **Query params:**
+
+  | Param | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `anio` | number | no | si viene, entero entre **2024 y 2100**. Si falta, usa el **año actual** del server. |
+  | `obligacion` | string | no | si viene, debe ser `monotributo`, `iva`, `autonomos` o `ingresos_brutos` |
+
+- **Response 200:** `Vencimiento[]`.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `anio` no entero o fuera de 2024–2100 | `{ "error": "anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `obligacion` con valor inválido | `{ "error": "obligacion debe ser una de: monotributo, iva, autonomos, ingresos_brutos" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+#### `PUT /api/vencimientos`
+- **Rol:** contador.
+- **Upsert masivo idempotente** del calendario. Por cada entry: `estudio_id` se toma del token; upsert con `onConflict` sobre `(estudio_id, obligacion, terminacion_cuit, anio, mes)`. Si la fila existe, **actualiza** `fecha_vencimiento`; si no, **inserta**.
+- **Request body:**
+  ```json
+  {
+    "entries": [
+      { "obligacion": "iva", "terminacion_cuit": 3, "anio": 2026, "mes": 6, "fecha_vencimiento": "2026-06-18" },
+      { "obligacion": "monotributo", "terminacion_cuit": null, "anio": 2026, "mes": 6, "fecha_vencimiento": "2026-06-20" }
+    ]
+  }
+  ```
+
+  | Campo (por entry) | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `obligacion` | string | sí | `monotributo`, `iva`, `autonomos` o `ingresos_brutos` |
+  | `terminacion_cuit` | number\|null | sí* | `null` (= "todos") o entero **0–9**. `undefined` se trata como `null`. |
+  | `anio` | number | sí | entero entre **2024 y 2100** |
+  | `mes` | number | sí | entero entre **1 y 12** |
+  | `fecha_vencimiento` | string | sí | formato exacto `YYYY-MM-DD` y fecha parseable |
+
+  > `estudio_id` en el body **se ignora** (se fuerza desde el token).
+  > Las entries se **deduplican por clave de conflicto** antes del upsert (conserva la última ocurrencia) para no violar el `ON CONFLICT` de Postgres.
+
+- **Response 200:**
+  ```json
+  {
+    "count": 2,
+    "data": [ /* Vencimiento[] */ ]
+  }
+  ```
+  > `count` = filas afectadas (tras dedup). `data` = filas resultantes con `VENCIMIENTO_FIELDS`.
+
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `entries` no es array o está vacío | `{ "error": "entries debe ser un array no vacío" }` |
+  | 400 | `entries` supera **500** elementos | `{ "error": "entries no puede superar 500 elementos" }` |
+  | 400 | `obligacion` inválida en `entries[i]` | `{ "error": "entries[i].obligacion debe ser una de: monotributo, iva, autonomos, ingresos_brutos" }` |
+  | 400 | `terminacion_cuit` inválido en `entries[i]` | `{ "error": "entries[i].terminacion_cuit debe ser null o un entero entre 0 y 9" }` |
+  | 400 | `anio` inválido en `entries[i]` | `{ "error": "entries[i].anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `mes` inválido en `entries[i]` | `{ "error": "entries[i].mes debe ser un entero entre 1 y 12" }` |
+  | 400 | `fecha_vencimiento` inválida en `entries[i]` | `{ "error": "entries[i].fecha_vencimiento debe tener formato YYYY-MM-DD" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+  > **Idempotencia:** correr el mismo `PUT` dos veces no duplica filas, **incluido** `terminacion_cuit = null`. El índice único `(estudio_id, obligacion, terminacion_cuit, anio, mes)` es `NULLS NOT DISTINCT` (PG15+), así el `null` ("todos") también colisiona y se actualiza en vez de duplicarse.
+  > `i` en los mensajes es el índice 0-based del entry que falló; se valida en orden y se corta en el primero inválido.
+
+#### `DELETE /api/vencimientos/:id`
+- **Rol:** contador.
+- **Borra un vencimiento por id**, solo si pertenece al estudio del token.
+- **Response 204:** sin body.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 404 | El vencimiento no existe o es de otro estudio | `{ "error": "Vencimiento no encontrado" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
 
 ---
 
@@ -648,9 +855,12 @@ Auth aplicada **por ruta** (no a nivel router). Las rutas de cliente se registra
 - `trust proxy = 1` seteado en `createApp()` — para que `req.ip` y el rate-limit funcionen detrás de un proxy/CDN.
 - Acceder a un recurso de otro estudio devuelve **404**, no 403.
 - Un JWT sigue siendo válido tras desactivar al usuario o cambiarle la contraseña (no hay revocación).
-- `monto` y `cuit`/`telefono` no validan longitud/formato en update → un valor que viole el límite de la columna devuelve **500** (error de DB), no 400.
-- El objeto `user` del login tiene menos campos que el `User` de los demás endpoints.
+- `monto` y `telefono` no validan longitud/formato en update → un valor que viole el límite de la columna devuelve **500** (error de DB), no 400. `cuit` **sí** se valida (formato + dígito verificador) tanto en create como en update de clientes.
+- El objeto `user` del login devuelve el `User` **completo** (mismo shape que los demás endpoints, sin `password_hash`); incluye `condicion_fiscal`/`categoria`.
 - El orden de evaluación de errores (400 "sin campos" vs 404 "no existe") difiere entre `PATCH contadores/:id` y `PATCH clientes/:id`.
+- Los `borrador` los ve **solo el contador**: aparecen en `GET /api/impuestos` (sin filtro) pero `GET /api/impuestos?estado=borrador` devuelve **400** y `/mis-impuestos` los excluye. Nunca vencen (el cron solo mira `pendiente`).
+- `POST /api/impuestos/generar` es **idempotente** y **no** envía emails; saltea clientes sin `condicion_fiscal` o con CUIT inválido reportándolos en la respuesta (no falla).
+- `PATCH /:id/estado` sobre un `borrador` se rechaza con **400 controlado** (guard antes de la DB; mensaje "Un borrador no se puede cambiar de estado; cargá el monto para pasarlo a pendiente"). Para pagarlo hay que completarle el monto antes vía `PATCH /:id` (lo pasa a `pendiente`).
 
 ---
 

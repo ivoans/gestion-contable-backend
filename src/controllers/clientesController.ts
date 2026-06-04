@@ -1,17 +1,26 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
-import { User } from '../types';
-import { isValidEmail } from '../utils/validators';
+import { CondicionFiscal, User } from '../types';
+import { isValidCuit, isValidEmail, normalizeCuit } from '../utils/validators';
 
-const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
+const USER_FIELDS =
+  'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, telefono, activo, created_at';
+
+const CONDICIONES_FISCALES: readonly CondicionFiscal[] = ['monotributista', 'responsable_inscripto'];
+
+function isValidCondicionFiscal(value: unknown): value is CondicionFiscal {
+  return CONDICIONES_FISCALES.includes(value as CondicionFiscal);
+}
 
 export async function crearCliente(req: Request, res: Response): Promise<void> {
-  const { nombre, email, password, cuit, telefono } = req.body as {
+  const { nombre, email, password, cuit, condicion_fiscal, categoria, telefono } = req.body as {
     nombre?: string;
     email?: string;
     password?: string;
     cuit?: string;
+    condicion_fiscal?: string;
+    categoria?: string | null;
     telefono?: string;
   };
 
@@ -27,6 +36,17 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
 
   if (password.length < 8) {
     res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    return;
+  }
+
+  if (!isValidCondicionFiscal(condicion_fiscal)) {
+    res.status(400).json({ error: 'condicion_fiscal inválida' });
+    return;
+  }
+
+  const cuitNormalizado = normalizeCuit(cuit);
+  if (!isValidCuit(cuit) || !cuitNormalizado) {
+    res.status(400).json({ error: 'CUIT inválido' });
     return;
   }
 
@@ -57,7 +77,9 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
         nombre,
         email,
         password_hash,
-        cuit: cuit ?? null,
+        cuit: cuitNormalizado,
+        condicion_fiscal,
+        categoria: categoria ?? null,
         telefono: telefono ?? null,
         role: 'cliente',
         estudio_id,
@@ -131,10 +153,12 @@ export async function obtenerCliente(req: Request, res: Response): Promise<void>
 export async function actualizarCliente(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const estudio_id = req.user!.estudio_id;
-  const { nombre, email, cuit, telefono } = req.body as {
+  const { nombre, email, cuit, condicion_fiscal, categoria, telefono } = req.body as {
     nombre?: string;
     email?: string;
     cuit?: string;
+    condicion_fiscal?: string;
+    categoria?: string | null;
     telefono?: string;
   };
 
@@ -143,10 +167,26 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
     return;
   }
 
+  if (condicion_fiscal !== undefined && !isValidCondicionFiscal(condicion_fiscal)) {
+    res.status(400).json({ error: 'condicion_fiscal inválida' });
+    return;
+  }
+
+  let cuitNormalizado: string | null = null;
+  if (cuit !== undefined) {
+    cuitNormalizado = normalizeCuit(cuit);
+    if (!isValidCuit(cuit) || !cuitNormalizado) {
+      res.status(400).json({ error: 'CUIT inválido' });
+      return;
+    }
+  }
+
   const updates: Partial<Record<string, unknown>> = {};
   if (nombre !== undefined) updates.nombre = nombre;
   if (email !== undefined) updates.email = email;
-  if (cuit !== undefined) updates.cuit = cuit;
+  if (cuit !== undefined) updates.cuit = cuitNormalizado;
+  if (condicion_fiscal !== undefined) updates.condicion_fiscal = condicion_fiscal;
+  if (categoria !== undefined) updates.categoria = categoria;
   if (telefono !== undefined) updates.telefono = telefono;
 
   if (Object.keys(updates).length === 0) {

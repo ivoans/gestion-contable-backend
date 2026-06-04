@@ -1,6 +1,6 @@
 // tests/helpers/factories.ts
 import jwt from 'jsonwebtoken';
-import type { User, Impuesto, JwtPayload, Role, EstadoImpuesto } from '../../src/types';
+import type { User, Impuesto, Vencimiento, JwtPayload, Role, EstadoImpuesto } from '../../src/types';
 
 let counter = 0;
 const nextId = () => `id-${++counter}-${Date.now()}`;
@@ -15,6 +15,8 @@ export function makeUser(overrides: Partial<User> = {}): User {
     email: `${id}@test.local`,
     role,
     cuit: null,
+    condicion_fiscal: null,
+    categoria: null,
     telefono: null,
     activo: true,
     created_at: new Date().toISOString(),
@@ -35,11 +37,27 @@ export function makeImpuesto(overrides: Partial<Impuesto> = {}): Impuesto {
     fecha_vencimiento: '2030-01-15',
     descripcion: null,
     link_pago: null,
+    vep: null,
     estado,
     pagado_at: estado === 'pagado' ? new Date().toISOString() : null,
     pagado_por: estado === 'pagado' ? 'contador-1' : null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+export function makeVencimiento(overrides: Partial<Vencimiento> = {}): Vencimiento {
+  const id = overrides.id ?? nextId();
+  return {
+    id,
+    estudio_id: 'estudio-1',
+    obligacion: 'iva',
+    terminacion_cuit: 0,
+    anio: 2026,
+    mes: 6,
+    fecha_vencimiento: '2026-06-15',
+    created_at: new Date().toISOString(),
     ...overrides,
   };
 }

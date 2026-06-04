@@ -388,6 +388,63 @@ describe('impuestos', () => {
       expect(sb.calls[1].op).toBe('update');
       expect(sb.calls[1].payload).toEqual({ tipo: 'Nuevo', monto: 2000 });
     });
+
+    it('completa borrador con monto + vep → transiciona a pendiente, persiste monto y vep', async () => {
+      const updated = makeImpuesto({ estado: 'pendiente', monto: 2000, vep: '1234567890' });
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador', monto: null }, error: null } },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x')
+        .set('Authorization', authA)
+        .send({ monto: 2000, vep: ' 1234567890 ' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(updated);
+      expect(sb.calls[1].op).toBe('update');
+      expect(sb.calls[1].payload).toEqual({ monto: 2000, vep: '1234567890', estado: 'pendiente' });
+    });
+
+    it('borrador solo con vep (sin monto) → sigue borrador, monto no se setea', async () => {
+      const updated = makeImpuesto({ estado: 'borrador', monto: null, vep: 'VEP-9' });
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador', monto: null }, error: null } },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x')
+        .set('Authorization', authA)
+        .send({ vep: 'VEP-9' });
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].op).toBe('update');
+      expect(sb.calls[1].payload).toEqual({ vep: 'VEP-9' });
+      expect(sb.calls[1].payload.estado).toBeUndefined();
+      expect(sb.calls[1].payload).not.toHaveProperty('monto');
+    });
+
+    it('400 si monto = 0 sobre un borrador (no transiciona)', async () => {
+      const res = await request(app)
+        .patch('/api/impuestos/x')
+        .set('Authorization', authA)
+        .send({ monto: 0, vep: 'V1' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('pendiente editando monto/vep sigue pendiente (sin re-transición)', async () => {
+      const updated = makeImpuesto({ estado: 'pendiente', monto: 3000, vep: 'V2' });
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'pendiente', monto: 1000 }, error: null } },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x')
+        .set('Authorization', authA)
+        .send({ monto: 3000, vep: 'V2' });
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toEqual({ monto: 3000, vep: 'V2' });
+      expect(sb.calls[1].payload.estado).toBeUndefined();
+    });
   });
 
   describe('PATCH /api/impuestos/:id/estado', () => {
@@ -410,6 +467,20 @@ describe('impuestos', () => {
         .send({});
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/pagado/);
+    });
+
+    it('400 si es borrador (guard antes de la DB, no 500)', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/estado')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/borrador/);
+      // No hizo el update: solo la query de lectura.
+      expect(sb.calls).toHaveLength(1);
     });
 
     it('200 transiciona pendiente → pagado con pagado_at + pagado_por', async () => {
@@ -496,6 +567,15 @@ describe('impuestos', () => {
       expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
     });
 
+    it('no devuelve borradores: query filtra neq estado borrador', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: [], error: null } }]);
+      const res = await request(app)
+        .get('/api/impuestos/mis-impuestos')
+        .set('Authorization', clienteAuth);
+      expect(res.status).toBe(200);
+      expect(sb.calls[0].filters).toContainEqual(['neq', 'estado', 'borrador']);
+    });
+
     it('cliente con eq cliente_id de su id (aislamiento)', async () => {
       sb.queue([{ table: 'impuestos', result: { data: [], error: null } }]);
       const otroAuth = bearerFor(clienteOtro);
@@ -564,6 +644,352 @@ describe('impuestos', () => {
       expect(sb.calls[0].filters).toContainEqual(['eq', 'id', 'cualquier-id']);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', clienteA.estudio_id]);
+    });
+  });
+
+  describe('POST /api/impuestos/generar', () => {
+    // CUITs válidos (módulo 11). El último dígito = dígito verificador.
+    const CUIT_MONO = '27112223334'; // termina en 4
+    const CUIT_RI = '20123456786'; // termina en 6
+
+    it('401 sin token', async () => {
+      const res = await request(app).post('/api/impuestos/generar').send({});
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', adminAuth)
+        .send({});
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio fuera de rango', async () => {
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2023, mes: 6 });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si mes inválido', async () => {
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 13 });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('genera monotributista: monotributo + ing brutos, ambos con terminacion null', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [{ id: 'cli-mono', nombre: 'Mono SA', cuit: CUIT_MONO, condicion_fiscal: 'monotributista' }],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        { table: 'impuestos', result: { data: [{ id: 'imp1' }, { id: 'imp2' }], error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        anio: 2026,
+        mes: 6,
+        creados: 2,
+        ya_existentes: 0,
+        clientes_salteados: [],
+        obligaciones_sin_fecha: [],
+      });
+
+      // Clientes: solo activos del estudio del JWT.
+      expect(sb.calls[0].table).toBe('users');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-A']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'activo', true]);
+
+      // Calendario: del estudio, mismo anio/mes.
+      expect(sb.calls[1].table).toBe('vencimientos');
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'estudio_id', 'estudio-A']);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'anio', 2026]);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'mes', 6]);
+
+      // Upsert idempotente con las dos obligaciones del monotributista.
+      const upsert = sb.calls[2];
+      expect(upsert.op).toBe('upsert');
+      expect(upsert.onConflict).toBe('cliente_id, obligacion, periodo');
+      expect(upsert.ignoreDuplicates).toBe(true);
+      expect(upsert.payload).toHaveLength(2);
+      expect(upsert.payload).toContainEqual(
+        expect.objectContaining({
+          estudio_id: 'estudio-A',
+          cliente_id: 'cli-mono',
+          creado_por: contadorA.id,
+          obligacion: 'monotributo',
+          tipo: 'Monotributo',
+          periodo: '2026-06-01',
+          fecha_vencimiento: '2026-06-20',
+          estado: 'borrador',
+          monto: null,
+          vep: null,
+        }),
+      );
+      expect(upsert.payload).toContainEqual(
+        expect.objectContaining({
+          cliente_id: 'cli-mono',
+          obligacion: 'ingresos_brutos',
+          tipo: 'Ingresos Brutos',
+          fecha_vencimiento: '2026-06-22',
+          estado: 'borrador',
+        }),
+      );
+
+      expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+    });
+
+    it('genera RI: iva + autonomos por dígito de CUIT, ing brutos con null', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [{ id: 'cli-ri', nombre: 'RI SA', cuit: CUIT_RI, condicion_fiscal: 'responsable_inscripto' }],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              // El CUIT termina en 6: la fila correcta para iva/autonomos es terminacion 6.
+              { obligacion: 'iva', terminacion_cuit: 6, fecha_vencimiento: '2026-06-18' },
+              { obligacion: 'iva', terminacion_cuit: 5, fecha_vencimiento: '2026-06-17' }, // distractor
+              { obligacion: 'autonomos', terminacion_cuit: 6, fecha_vencimiento: '2026-06-12' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        { table: 'impuestos', result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }], error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(3);
+      expect(res.body.obligaciones_sin_fecha).toEqual([]);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      expect(payload).toHaveLength(3);
+
+      // IVA tomó la fila de terminacion 6, NO la distractora de terminacion 5.
+      const iva = payload.find((p) => p.obligacion === 'iva');
+      expect(iva).toMatchObject({ tipo: 'IVA', fecha_vencimiento: '2026-06-18' });
+
+      const autonomos = payload.find((p) => p.obligacion === 'autonomos');
+      expect(autonomos).toMatchObject({ tipo: 'Autónomos', fecha_vencimiento: '2026-06-12' });
+
+      const ingBrutos = payload.find((p) => p.obligacion === 'ingresos_brutos');
+      expect(ingBrutos).toMatchObject({ tipo: 'Ingresos Brutos', fecha_vencimiento: '2026-06-22' });
+
+      expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+    });
+
+    it('saltea cliente sin condicion_fiscal y con cuit inválido', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              { id: 'cli-noc', nombre: 'Sin Cond', cuit: CUIT_RI, condicion_fiscal: null },
+              { id: 'cli-badc', nombre: 'Cuit Malo', cuit: '123', condicion_fiscal: 'monotributista' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        // Sin candidatos → no hay upsert a impuestos (no se programa).
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(0);
+      expect(res.body.ya_existentes).toBe(0);
+      expect(res.body.clientes_salteados).toContainEqual({
+        cliente_id: 'cli-noc',
+        nombre: 'Sin Cond',
+        motivo: 'Sin condición fiscal',
+      });
+      expect(res.body.clientes_salteados).toContainEqual({
+        cliente_id: 'cli-badc',
+        nombre: 'Cuit Malo',
+        motivo: 'CUIT inválido',
+      });
+      // No tocó impuestos: solo users + vencimientos.
+      expect(sb.calls).toHaveLength(2);
+      expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+    });
+
+    it('saltea obligación sin fila en el calendario → obligaciones_sin_fecha', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [{ id: 'cli-ri2', nombre: 'RI2', cuit: CUIT_RI, condicion_fiscal: 'responsable_inscripto' }],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'iva', terminacion_cuit: 6, fecha_vencimiento: '2026-06-18' },
+              // autonomos ausente → debe caer en obligaciones_sin_fecha
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        { table: 'impuestos', result: { data: [{ id: 'i1' }, { id: 'i2' }], error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(2);
+      expect(res.body.obligaciones_sin_fecha).toEqual([
+        { cliente_id: 'cli-ri2', nombre: 'RI2', obligacion: 'autonomos' },
+      ]);
+      expect(sb.calls[2].payload).toHaveLength(2);
+    });
+
+    it('idempotencia: segunda corrida crea 0 y reporta ya_existentes', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [{ id: 'cli-mono', nombre: 'Mono', cuit: CUIT_MONO, condicion_fiscal: 'monotributista' }],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        // ON CONFLICT DO NOTHING: ya existían las dos → select() devuelve vacío.
+        { table: 'impuestos', result: { data: [], error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(0);
+      expect(res.body.ya_existentes).toBe(2);
+      expect(sb.calls[2].ignoreDuplicates).toBe(true);
+      expect(sb.calls[2].onConflict).toBe('cliente_id, obligacion, periodo');
+    });
+
+    it('multi-tenant: contador B solo consulta su estudio', async () => {
+      sb.queue([
+        { table: 'users', result: { data: [], error: null } },
+        { table: 'vencimientos', result: { data: [], error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authB)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(0);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls[0].filters).not.toContainEqual(['eq', 'estudio_id', 'estudio-A']);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls[1].filters).not.toContainEqual(['eq', 'estudio_id', 'estudio-A']);
+    });
+
+    it('sin body → usa anio/mes actual', async () => {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = now.getMonth() + 1;
+      sb.queue([
+        { table: 'users', result: { data: [], error: null } },
+        { table: 'vencimientos', result: { data: [], error: null } },
+      ]);
+
+      const res = await request(app).post('/api/impuestos/generar').set('Authorization', authA);
+
+      expect(res.status).toBe(200);
+      expect(res.body.anio).toBe(y);
+      expect(res.body.mes).toBe(m);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'anio', y]);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'mes', m]);
+    });
+
+    it('500 si la DB de clientes da error', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: { message: 'boom' } } }]);
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'Error interno del servidor' });
     });
   });
 });
