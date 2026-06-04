@@ -158,11 +158,11 @@ Login endpoint vía Supertest. Mock de Supabase + bcrypt + loginLimiter pass-thr
 
 **PATCH /clientes/:id/estado** (3): 400 si no boolean, 404 cross-estudio, 200 toggle.
 
-### `tests/impuestos.test.ts` — 41 tests
+### `tests/impuestos.test.ts` — 38 tests
 
-**POST /impuestos — auth + validators** (12): 401 sin token, 403 admin, 403 cliente, 400 faltan campos, 400 tipo>100, 400 monto=0, 400 monto<0, 400 monto no número, 400 fecha mal formato, 400 fecha mes 13, 400 link_pago `http://`, 400 link_pago `javascript:`.
+**POST /impuestos — auth + validators** (10): 401 sin token, 403 admin, 403 cliente, 400 faltan campos, 400 tipo>100, 400 monto=0, 400 monto<0, 400 monto no número, 400 fecha mal formato, 400 fecha mes 13.
 
-**POST /impuestos — flujo** (3): 404 cliente cross-estudio, 201 happy (insert con `estudio_id` + `creado_por` del JWT, email a cliente, notif insert con `tipo: 'nuevo', canal: 'email'`), 201 con `descripcion`/`link_pago` null.
+**POST /impuestos — flujo** (3): 404 cliente cross-estudio, 201 happy (insert con `estudio_id` + `creado_por` del JWT, email a cliente, notif insert con `tipo: 'nuevo', canal: 'email'`), 201 con `descripcion` null.
 
 **POST /impuestos — email** (1): 201 aunque `sendNuevoImpuesto` rechace (notif **no** se inserta porque el send falla antes; impuesto creado igual).
 
@@ -170,7 +170,7 @@ Login endpoint vía Supertest. Mock de Supabase + bcrypt + loginLimiter pass-thr
 
 **GET /impuestos/:id** (2): 404 cross-estudio, 200 mismo estudio.
 
-**PATCH /impuestos/:id** (7): 400 monto<0, 400 fecha mala, 400 link `http://`, 400 sin campos, 404 cross-estudio, **400 si pagado** (no editable), 200 update.
+**PATCH /impuestos/:id** (6): 400 monto<0, 400 fecha mala, 400 sin campos, 404 cross-estudio, **400 si pagado** (no editable), 200 update.
 
 **PATCH /impuestos/:id/estado** (5): 404, 400 si ya pagado, 200 transición → pagado con `pagado_at` + `pagado_por: req.user.id`, **body `{estado:'vencido'}` es ignorado y setea pagado igual** (spec dice transición legal solo es la del cron), 200 vencido→pagado permitido.
 
@@ -197,7 +197,7 @@ Mock `procesarVencidos` y `procesarRecordatorios` (ambas exportadas desde `venci
 | `procesarRecordatorios`: error email no rompe loop | igual que vencidos |
 
 ### `tests/emailService.test.ts` — alta prioridad
-Mock `Resend` constructor → `emails.send` controlado. **No** mockear las funciones internas (`escapeHtml`, `safeHref`); testearlas a través del payload del send.
+Mock `Resend` constructor → `emails.send` controlado. **No** mockear las funciones internas (`escapeHtml`); testearlas a través del payload del send.
 
 | Caso | Verifica |
 |------|----------|
@@ -206,9 +206,6 @@ Mock `Resend` constructor → `emails.send` controlado. **No** mockear las funci
 | `sendVencido(to: string)` | `to` es **string single** (no array), matchea spec actual |
 | `escapeHtml`: `<script>` en nombre | HTML escapeado en payload (`&lt;script&gt;`) |
 | `escapeHtml`: comillas + `&` en tipo | `&quot;`, `&amp;` |
-| `safeHref`: rechaza `javascript:` | link_pago no aparece en HTML |
-| `safeHref`: rechaza `http://` | mismo |
-| `safeHref`: acepta `https://` | aparece como href válido |
 | `sendNuevoImpuesto`: render mínimo | nombre, tipo, monto formateado, fecha en `dd/mm/yyyy` |
 | Email falla → controller no rompe | ya cubierto en `impuestos.test.ts` (happy ya checkeado) |
 
@@ -265,6 +262,6 @@ Cubierto bien:
 
 Sin cubrir aún:
 - vencimientosCron (jobs)
-- emailService (escape/safeHref/templates)
+- emailService (escape/templates)
 - routes/internal (run-cron)
 - CORS / health (smoke)

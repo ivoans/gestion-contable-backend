@@ -65,7 +65,6 @@ CREATE TABLE impuestos (
   monto             DECIMAL(12, 2),
   fecha_vencimiento DATE NOT NULL,
   descripcion       TEXT,
-  link_pago         VARCHAR(500),
   vep               VARCHAR,
   obligacion        obligacion,  -- NULL = impuesto manual
   periodo           DATE,        -- mes declarado; NULL = manual

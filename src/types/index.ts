@@ -34,7 +34,6 @@ export interface Impuesto {
   monto: number;
   fecha_vencimiento: string;
   descripcion: string | null;
-  link_pago: string | null;
   vep: string | null;
   estado: EstadoImpuesto;
   pagado_at: string | null;

@@ -40,7 +40,6 @@ describe('impuestos', () => {
     monto: 1500,
     fecha_vencimiento: '2030-01-15',
     descripcion: 'Pago mensual',
-    link_pago: 'https://pagar.example/abc',
   };
 
   beforeEach(() => {
@@ -129,22 +128,6 @@ describe('impuestos', () => {
       expect(res.status).toBe(400);
     });
 
-    it('400 si link_pago http://', async () => {
-      const res = await request(app)
-        .post('/api/impuestos')
-        .set('Authorization', authA)
-        .send({ ...validBody, link_pago: 'http://insecure.example/x' });
-      expect(res.status).toBe(400);
-    });
-
-    it('400 si link_pago javascript:', async () => {
-      const res = await request(app)
-        .post('/api/impuestos')
-        .set('Authorization', authA)
-        .send({ ...validBody, link_pago: 'javascript:alert(1)' });
-      expect(res.status).toBe(400);
-    });
-
     it('404 si cliente_id pertenece a otro estudio', async () => {
       // contadorB busca cliente de estudio-A → query lleva eq estudio_id=B → null.
       sb.queue([{ table: 'users', result: { data: null, error: null } }]);
@@ -164,7 +147,6 @@ describe('impuestos', () => {
         tipo: validBody.tipo,
         monto: validBody.monto,
         fecha_vencimiento: validBody.fecha_vencimiento,
-        link_pago: validBody.link_pago,
       });
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
@@ -237,7 +219,7 @@ describe('impuestos', () => {
       expect(sb.calls).toHaveLength(3); // sin notif insert
     });
 
-    it('descripcion y link_pago null si no enviados', async () => {
+    it('descripcion null si no enviada', async () => {
       const created = makeImpuesto({ cliente_id: clienteA.id });
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
@@ -255,7 +237,7 @@ describe('impuestos', () => {
           fecha_vencimiento: '2030-01-15',
         });
       expect(res.status).toBe(201);
-      expect(sb.calls[1].payload).toMatchObject({ descripcion: null, link_pago: null });
+      expect(sb.calls[1].payload).toMatchObject({ descripcion: null });
     });
   });
 
@@ -333,14 +315,6 @@ describe('impuestos', () => {
         .patch('/api/impuestos/x')
         .set('Authorization', authA)
         .send({ fecha_vencimiento: '01-2030-15' });
-      expect(res.status).toBe(400);
-    });
-
-    it('400 si link_pago http://', async () => {
-      const res = await request(app)
-        .patch('/api/impuestos/x')
-        .set('Authorization', authA)
-        .send({ link_pago: 'http://x.com' });
       expect(res.status).toBe(400);
     });
 
