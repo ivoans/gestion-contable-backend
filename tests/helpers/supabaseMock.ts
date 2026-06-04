@@ -30,6 +30,8 @@ export type RecordedCall = {
   payload?: any;
   /** Opción onConflict pasada a upsert (args[1].onConflict), si hubo. */
   onConflict?: string;
+  /** Opción ignoreDuplicates pasada a upsert (args[1].ignoreDuplicates), si hubo. */
+  ignoreDuplicates?: boolean;
   terminal: 'single' | 'maybeSingle' | 'await' | null;
 };
 
@@ -69,6 +71,7 @@ export function createSupabaseMock(initial: FromCall[] = []): SupabaseMock {
           }
           if (method === 'upsert') {
             recorded.onConflict = args[1]?.onConflict;
+            recorded.ignoreDuplicates = args[1]?.ignoreDuplicates;
           }
         } else {
           recorded.filters.push([method, ...args]);

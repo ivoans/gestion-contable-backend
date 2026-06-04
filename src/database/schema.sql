@@ -137,10 +137,13 @@ CREATE INDEX idx_impuestos_fecha_vencimiento ON impuestos(fecha_vencimiento);
 -- Índice compuesto para el cron job (busca pendientes vencidos todos los días)
 CREATE INDEX idx_impuestos_cron ON impuestos(estado, fecha_vencimiento)
   WHERE estado = 'pendiente';
--- Anti-duplicado de la generación automática, sin afectar a los manuales (obligacion NULL)
+-- Anti-duplicado de la generación automática. Índice único PLENO (sin predicado):
+-- así Postgres lo infiere en el ON CONFLICT del upsert (supabase-js no manda WHERE).
+-- NULLS DISTINCT (default): los manuales (obligacion/periodo NULL) no colisionan,
+-- un cliente puede tener muchos. OJO: acá NO va NULLS NOT DISTINCT (al revés que
+-- vencimientos) justamente para que los nulls de los manuales NO choquen.
 CREATE UNIQUE INDEX uq_impuestos_obligacion_periodo
-  ON impuestos (cliente_id, obligacion, periodo)
-  WHERE obligacion IS NOT NULL;
+  ON impuestos (cliente_id, obligacion, periodo);
 
 -- vencimientos
 CREATE INDEX idx_vencimientos_estudio_id ON vencimientos(estudio_id);

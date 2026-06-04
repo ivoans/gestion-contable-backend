@@ -37,6 +37,7 @@ export function makeImpuesto(overrides: Partial<Impuesto> = {}): Impuesto {
     fecha_vencimiento: '2030-01-15',
     descripcion: null,
     link_pago: null,
+    vep: null,
     estado,
     pagado_at: estado === 'pagado' ? new Date().toISOString() : null,
     pagado_por: estado === 'pagado' ? 'contador-1' : null,

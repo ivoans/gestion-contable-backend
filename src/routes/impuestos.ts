@@ -3,6 +3,7 @@ import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
 import {
   crearImpuesto,
+  generarImpuestos,
   listarImpuestos,
   obtenerImpuesto,
   actualizarImpuesto,
@@ -18,6 +19,7 @@ router.get('/mis-impuestos', authenticate, requireRole('cliente'), misImpuestos)
 router.get('/mis-impuestos/:id', authenticate, requireRole('cliente'), miImpuesto);
 
 // Contador routes
+router.post('/generar', authenticate, requireRole('contador'), generarImpuestos);
 router.post('/', authenticate, requireRole('contador'), crearImpuesto);
 router.get('/', authenticate, requireRole('contador'), listarImpuestos);
 router.get('/:id', authenticate, requireRole('contador'), obtenerImpuesto);
