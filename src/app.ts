@@ -5,6 +5,7 @@ import authRouter from './routes/auth';
 import adminRouter from './routes/admin';
 import clientesRouter from './routes/clientes';
 import impuestosRouter from './routes/impuestos';
+import movimientosRouter from './routes/movimientos';
 import vencimientosRouter from './routes/vencimientos';
 import internalRouter from './routes/internal';
 
@@ -38,6 +39,7 @@ export function createApp(): Express {
   app.use('/api/admin', adminRouter);
   app.use('/api/clientes', clientesRouter);
   app.use('/api/impuestos', impuestosRouter);
+  app.use('/api/movimientos', movimientosRouter);
   app.use('/api/vencimientos', vencimientosRouter);
   app.use('/api/internal', internalRouter);
 

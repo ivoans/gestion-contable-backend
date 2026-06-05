@@ -35,11 +35,25 @@ export type RecordedCall = {
   terminal: 'single' | 'maybeSingle' | 'await' | null;
 };
 
+/** Programa una respuesta por cada `supabase.rpc(fn, args)` consumido en orden. */
+export type RpcCall = {
+  fn: string;
+  result: SupabaseResult;
+};
+
+export type RecordedRpcCall = {
+  fn: string;
+  args: any;
+};
+
 export type SupabaseMock = {
-  client: { from: ReturnType<typeof vi.fn> };
+  client: { from: ReturnType<typeof vi.fn>; rpc: ReturnType<typeof vi.fn> };
   queue: (calls: FromCall[]) => void;
   push: (call: FromCall) => void;
+  queueRpc: (calls: RpcCall[]) => void;
+  pushRpc: (call: RpcCall) => void;
   calls: RecordedCall[];
+  rpcCalls: RecordedRpcCall[];
   reset: () => void;
 };
 
@@ -53,7 +67,9 @@ const TERMINALS_OP = new Set(['select', 'insert', 'update', 'delete', 'upsert'])
 
 export function createSupabaseMock(initial: FromCall[] = []): SupabaseMock {
   let pending: FromCall[] = [...initial];
+  let pendingRpc: RpcCall[] = [];
   const calls: RecordedCall[] = [];
+  const rpcCalls: RecordedRpcCall[] = [];
 
   function makeBuilder(call: FromCall, recorded: RecordedCall) {
     const builder: any = {};
@@ -116,15 +132,37 @@ export function createSupabaseMock(initial: FromCall[] = []): SupabaseMock {
     return makeBuilder(next, recorded);
   });
 
+  // Mismo patrón de cola que `from`, pero para supabase.rpc(fn, args). Se awaitea
+  // directo → resuelve a { data, error }.
+  const rpc = vi.fn((fn: string, args: any) => {
+    rpcCalls.push({ fn, args });
+    const next = pendingRpc.shift();
+    if (!next) {
+      throw new Error(
+        `[supabaseMock] rpc('${fn}') sin respuesta programada. Programá con queueRpc()/pushRpc().`,
+      );
+    }
+    if (next.fn !== fn) {
+      throw new Error(`[supabaseMock] rpc('${fn}') no matchea programado '${next.fn}'.`);
+    }
+    return Promise.resolve(next.result);
+  });
+
   return {
-    client: { from },
+    client: { from, rpc },
     queue: (newCalls) => { pending = [...newCalls]; },
     push: (call) => { pending.push(call); },
+    queueRpc: (newCalls) => { pendingRpc = [...newCalls]; },
+    pushRpc: (call) => { pendingRpc.push(call); },
     calls,
+    rpcCalls,
     reset: () => {
       pending = [];
+      pendingRpc = [];
       calls.length = 0;
+      rpcCalls.length = 0;
       from.mockClear();
+      rpc.mockClear();
     },
   };
 }
