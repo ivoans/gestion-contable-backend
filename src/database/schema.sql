@@ -15,6 +15,8 @@ CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado', 'borrador
 CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido');
 CREATE TYPE condicion_fiscal AS ENUM ('monotributista', 'responsable_inscripto');
 CREATE TYPE obligacion AS ENUM ('monotributo', 'iva', 'autonomos', 'ingresos_brutos');
+CREATE TYPE movimiento_tipo AS ENUM ('compra', 'venta');
+CREATE TYPE movimiento_origen AS ENUM ('importado', 'manual');
 
 -- ============================================================
 -- TABLA: estudios
@@ -120,6 +122,34 @@ CREATE TABLE notificaciones (
 );
 
 -- ============================================================
+-- TABLA: movimientos (libro IVA compras/ventas)
+-- ============================================================
+
+CREATE TABLE movimientos (
+  id                        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id                UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id                UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  tipo                      movimiento_tipo NOT NULL,
+  periodo                   DATE NOT NULL,            -- primer día del mes del libro
+  fecha                     DATE NOT NULL,            -- fecha del comprobante (puede ser de otro mes)
+  tipo_comprobante          TEXT,
+  letra                     TEXT,
+  numero                    TEXT,
+  contraparte               TEXT,
+  cuit_contraparte          TEXT,
+  neto                      NUMERIC(15, 2),
+  concepto_no_gravado       NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  iva                       NUMERIC(15, 2),
+  acrecentamiento           NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  total                     NUMERIC(15, 2) NOT NULL,
+  retenciones_percepciones  NUMERIC(15, 2),
+  op_exentas                NUMERIC(15, 2),
+  origen                    movimiento_origen NOT NULL,
+  creado_por                UUID REFERENCES users(id) ON DELETE RESTRICT,
+  created_at                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+-- ============================================================
 -- ÍNDICES
 -- ============================================================
 
@@ -146,6 +176,11 @@ CREATE UNIQUE INDEX uq_impuestos_obligacion_periodo
 
 -- vencimientos
 CREATE INDEX idx_vencimientos_estudio_id ON vencimientos(estudio_id);
+
+-- movimientos
+-- Libro de un cliente por mes; también soporta el reemplazo de importados en la re-subida.
+CREATE INDEX idx_movimientos_libro
+  ON movimientos (estudio_id, cliente_id, tipo, periodo);
 
 -- notificaciones
 CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
