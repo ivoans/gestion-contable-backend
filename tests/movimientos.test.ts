@@ -625,3 +625,399 @@ describe('movimientos — CRUD manual', () => {
     });
   });
 });
+
+describe('movimientos — LECTURA', () => {
+  let app: ReturnType<typeof createApp>;
+
+  const contadorA = makeUser({ id: 'contadorA', role: 'contador', estudio_id: 'estudio-A' });
+  const contadorB = makeUser({ id: 'contadorB', role: 'contador', estudio_id: 'estudio-B' });
+  const admin = makeUser({ role: 'admin' });
+  const clienteUser = makeUser({ id: CLIENTE_A, role: 'cliente', estudio_id: 'estudio-A' });
+
+  const authA = bearerFor(contadorA);
+  const authB = bearerFor(contadorB);
+  const adminAuth = bearerFor(admin);
+  const clienteAuth = bearerFor(clienteUser);
+
+  // Query válida mínima.
+  const baseQuery = { cliente_id: CLIENTE_A, anio: '2026', mes: '4' };
+
+  const clienteOk = { table: 'users', result: { data: { id: CLIENTE_A }, error: null } } as const;
+  const clienteNull = { table: 'users', result: { data: null, error: null } } as const;
+
+  beforeEach(() => {
+    sb.reset();
+    app = createApp();
+  });
+
+  // ── GET /api/movimientos (listado) ───────────────────────────────────────────
+  describe('GET /api/movimientos', () => {
+    const list = (auth: string | null, query: Record<string, string>) => {
+      let r = request(app).get('/api/movimientos');
+      if (auth) r = r.set('Authorization', auth);
+      return r.query(query);
+    };
+
+    it('401 sin token', async () => {
+      const res = await list(null, baseQuery);
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await list(clienteAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await list(adminAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si cliente_id no es uuid', async () => {
+      const res = await list(authA, { ...baseQuery, cliente_id: 'no-uuid' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio fuera de rango', async () => {
+      const res = await list(authA, { ...baseQuery, anio: '1999' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si mes inválido', async () => {
+      const res = await list(authA, { ...baseQuery, mes: '13' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si tipo es inválido', async () => {
+      const res = await list(authA, { ...baseQuery, tipo: 'otro' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si el cliente es de otro estudio', async () => {
+      sb.queue([clienteNull]);
+      const res = await list(authB, baseQuery);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Cliente no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('404 si el cliente no existe / no es cliente', async () => {
+      sb.queue([clienteNull]);
+      const res = await list(authA, { ...baseQuery, cliente_id: CLIENTE_OTRO });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+    });
+
+    it('200 devuelve array ordenado con shape MOVIMIENTO_FIELDS', async () => {
+      const filas = [
+        makeMov({ fecha: '2026-04-02', tipo: 'venta' }),
+        makeMov({ fecha: '2026-04-10', tipo: 'compra' }),
+      ];
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: filas, error: null } }]);
+
+      const res = await list(authA, baseQuery);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(filas);
+
+      // Filtra por estudio+cliente+periodo y ordena fecha asc, created_at asc.
+      const q = sb.calls[1];
+      expect(q.table).toBe('movimientos');
+      expect(q.filters).toContainEqual(['eq', 'estudio_id', 'estudio-A']);
+      expect(q.filters).toContainEqual(['eq', 'cliente_id', CLIENTE_A]);
+      expect(q.filters).toContainEqual(['eq', 'periodo', '2026-04-01']);
+      expect(q.filters).toContainEqual(['order', 'fecha', { ascending: true }]);
+      expect(q.filters).toContainEqual(['order', 'created_at', { ascending: true }]);
+      // sin tipo → no se filtra por tipo.
+      expect(q.filters.some((f) => f[0] === 'eq' && f[1] === 'tipo')).toBe(false);
+    });
+
+    it('200 filtra por tipo cuando viene', async () => {
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: [], error: null } }]);
+      const res = await list(authA, { ...baseQuery, tipo: 'venta' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'tipo', 'venta']);
+    });
+
+    it('500 si la query de movimientos falla', async () => {
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: null, error: { message: 'boom' } } }]);
+      const res = await list(authA, baseQuery);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Error interno del servidor');
+    });
+  });
+
+  // ── GET /api/movimientos/resumen ─────────────────────────────────────────────
+  describe('GET /api/movimientos/resumen', () => {
+    const resumen = (auth: string | null, query: Record<string, string>) => {
+      let r = request(app).get('/api/movimientos/resumen');
+      if (auth) r = r.set('Authorization', auth);
+      return r.query(query);
+    };
+
+    it('401 sin token', async () => {
+      const res = await resumen(null, baseQuery);
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await resumen(clienteAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await resumen(adminAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio fuera de rango', async () => {
+      const res = await resumen(authA, { ...baseQuery, anio: '2101' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si mes inválido', async () => {
+      const res = await resumen(authA, { ...baseQuery, mes: '0' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si el cliente es de otro estudio', async () => {
+      sb.queue([clienteNull]);
+      const res = await resumen(authB, baseQuery);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Cliente no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('404 si el cliente no existe / no es cliente', async () => {
+      sb.queue([clienteNull]);
+      const res = await resumen(authA, { ...baseQuery, cliente_id: CLIENTE_OTRO });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+    });
+
+    it('200 recalcula la matemática (montos como string → coerciona)', async () => {
+      // Supabase puede mandar NUMERIC como string; el back coerciona a number.
+      const filas = [
+        makeMov({ tipo: 'venta', neto: '100.00', iva: '21.00', total: '121.00' }),
+        makeMov({ tipo: 'compra', neto: '50.00', iva: '5.25', total: '55.25' }),
+      ];
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: filas, error: null } }]);
+
+      const res = await resumen(authA, baseQuery);
+
+      expect(res.status).toBe(200);
+      expect(res.body.periodo).toEqual({ anio: 2026, mes: 4 });
+      expect(res.body.ventas).toEqual({
+        cantidad: 1, total: 121, neto: 100, iva: 21, op_exentas: 0, ret_perc: 0,
+      });
+      expect(res.body.compras).toEqual({
+        cantidad: 1, total: 55.25, neto: 50, iva: 5.25, op_exentas: 0, ret_perc: 0,
+      });
+      expect(res.body.iva).toEqual({ debito: 21, credito: 5.25, saldo: 15.75 });
+
+      // por_alicuota: bucket 21% para la venta, 10.5% para la compra.
+      expect(res.body.por_alicuota).toContainEqual({
+        tipo: 'venta', alicuota: 21, neto: 100, iva: 21, cantidad: 1,
+      });
+      expect(res.body.por_alicuota).toContainEqual({
+        tipo: 'compra', alicuota: 10.5, neto: 50, iva: 5.25, cantidad: 1,
+      });
+      expect(res.body.por_alicuota).toHaveLength(2);
+
+      // No se filtró por tipo (trae todo el período).
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'periodo', '2026-04-01']);
+      expect(sb.calls[1].filters.some((f) => f[0] === 'eq' && f[1] === 'tipo')).toBe(false);
+    });
+
+    it('200 iva=null (monotributista): suma 0 y no entra en por_alicuota', async () => {
+      const filas = [
+        makeMov({ tipo: 'venta', neto: null, iva: null, total: '100.00' }),
+        makeMov({ tipo: 'venta', neto: '100.00', iva: '21.00', total: '121.00' }),
+      ];
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: filas, error: null } }]);
+
+      const res = await resumen(authA, baseQuery);
+
+      expect(res.status).toBe(200);
+      // El mov sin iva igual cuenta en cantidad/total, su iva suma 0.
+      expect(res.body.ventas).toEqual({
+        cantidad: 2, total: 221, neto: 100, iva: 21, op_exentas: 0, ret_perc: 0,
+      });
+      expect(res.body.iva).toEqual({ debito: 21, credito: 0, saldo: 21 });
+      // Solo la venta con iva entra en por_alicuota.
+      expect(res.body.por_alicuota).toEqual([
+        { tipo: 'venta', alicuota: 21, neto: 100, iva: 21, cantidad: 1 },
+      ]);
+    });
+
+    it('200 sin movimientos: bloques en cero y por_alicuota vacío', async () => {
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: [], error: null } }]);
+      const res = await resumen(authA, baseQuery);
+      expect(res.status).toBe(200);
+      expect(res.body.ventas).toEqual({ cantidad: 0, total: 0, neto: 0, iva: 0, op_exentas: 0, ret_perc: 0 });
+      expect(res.body.compras).toEqual({ cantidad: 0, total: 0, neto: 0, iva: 0, op_exentas: 0, ret_perc: 0 });
+      expect(res.body.iva).toEqual({ debito: 0, credito: 0, saldo: 0 });
+      expect(res.body.por_alicuota).toEqual([]);
+    });
+
+    it('500 si la query de movimientos falla', async () => {
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: null, error: { message: 'boom' } } }]);
+      const res = await resumen(authA, baseQuery);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Error interno del servidor');
+    });
+  });
+
+  // ── GET /api/movimientos/tendencia ───────────────────────────────────────────
+  describe('GET /api/movimientos/tendencia', () => {
+    const tendencia = (auth: string | null, query: Record<string, string>) => {
+      let r = request(app).get('/api/movimientos/tendencia');
+      if (auth) r = r.set('Authorization', auth);
+      return r.query(query);
+    };
+
+    const mesDe = (serie: any[], anio: number, mes: number) =>
+      serie.find((x) => x.periodo.anio === anio && x.periodo.mes === mes);
+
+    it('401 sin token', async () => {
+      const res = await tendencia(null, baseQuery);
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await tendencia(clienteAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await tendencia(adminAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio fuera de rango', async () => {
+      const res = await tendencia(authA, { ...baseQuery, anio: '1999' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si mes inválido', async () => {
+      const res = await tendencia(authA, { ...baseQuery, mes: '13' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si meses fuera de 1–36', async () => {
+      const res = await tendencia(authA, { ...baseQuery, meses: '37' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si meses no es entero', async () => {
+      const res = await tendencia(authA, { ...baseQuery, meses: '0' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si el cliente es de otro estudio', async () => {
+      sb.queue([clienteNull]);
+      const res = await tendencia(authB, baseQuery);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Cliente no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('404 si el cliente no existe / no es cliente', async () => {
+      sb.queue([clienteNull]);
+      const res = await tendencia(authA, { ...baseQuery, cliente_id: CLIENTE_OTRO });
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+    });
+
+    it('200 serie default 12 meses: ventana, orden, totales y meses vacíos en 0', async () => {
+      // Ventana anio=2026 mes=4 meses=12 → 2025-05 .. 2026-04 (12 meses).
+      // Datos en 3 períodos; montos como string para ejercitar la coerción.
+      const filas = [
+        makeMov({ tipo: 'venta', periodo: '2026-04-01', neto: '100.00', iva: '21.00', total: '121.00' }),
+        makeMov({ tipo: 'compra', periodo: '2026-04-01', neto: '50.00', iva: '5.25', total: '55.25' }),
+        makeMov({ tipo: 'venta', periodo: '2026-03-01', neto: '200.00', iva: '42.00', total: '242.00' }),
+        makeMov({ tipo: 'compra', periodo: '2025-12-01', neto: '500.00', iva: '10.50', total: '510.50' }),
+      ];
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: filas, error: null } }]);
+
+      const res = await tendencia(authA, baseQuery);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(12);
+      // Orden cronológico ascendente: primero 2025-05, último 2026-04.
+      expect(res.body[0].periodo).toEqual({ anio: 2025, mes: 5 });
+      expect(res.body[11].periodo).toEqual({ anio: 2026, mes: 4 });
+
+      // Una sola query, con la ventana como rango sobre periodo.
+      expect(sb.calls[1].filters).toContainEqual(['gte', 'periodo', '2025-05-01']);
+      expect(sb.calls[1].filters).toContainEqual(['lte', 'periodo', '2026-04-01']);
+
+      expect(mesDe(res.body, 2026, 4)).toEqual({
+        periodo: { anio: 2026, mes: 4 },
+        cantidad: 2, ventas_total: 121, compras_total: 55.25,
+        iva_debito: 21, iva_credito: 5.25, iva_saldo: 15.75,
+      });
+      expect(mesDe(res.body, 2026, 3)).toEqual({
+        periodo: { anio: 2026, mes: 3 },
+        cantidad: 1, ventas_total: 242, compras_total: 0,
+        iva_debito: 42, iva_credito: 0, iva_saldo: 42,
+      });
+      expect(mesDe(res.body, 2025, 12)).toEqual({
+        periodo: { anio: 2025, mes: 12 },
+        cantidad: 1, ventas_total: 0, compras_total: 510.5,
+        iva_debito: 0, iva_credito: 10.5, iva_saldo: -10.5,
+      });
+      // Mes sin movimientos → todo en 0.
+      expect(mesDe(res.body, 2025, 5)).toEqual({
+        periodo: { anio: 2025, mes: 5 },
+        cantidad: 0, ventas_total: 0, compras_total: 0,
+        iva_debito: 0, iva_credito: 0, iva_saldo: 0,
+      });
+    });
+
+    it('200 respeta meses custom y cruza el año hacia atrás', async () => {
+      // meses=3 terminando en 2026-04 → 2026-02, 2026-03, 2026-04.
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: [], error: null } }]);
+      const res = await tendencia(authA, { ...baseQuery, meses: '3' });
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(3);
+      expect(res.body.map((x: any) => x.periodo)).toEqual([
+        { anio: 2026, mes: 2 },
+        { anio: 2026, mes: 3 },
+        { anio: 2026, mes: 4 },
+      ]);
+      expect(sb.calls[1].filters).toContainEqual(['gte', 'periodo', '2026-02-01']);
+      expect(sb.calls[1].filters).toContainEqual(['lte', 'periodo', '2026-04-01']);
+    });
+
+    it('500 si la query de movimientos falla', async () => {
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: null, error: { message: 'boom' } } }]);
+      const res = await tendencia(authA, baseQuery);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Error interno del servidor');
+    });
+  });
+});

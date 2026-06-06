@@ -7,6 +7,9 @@ import {
   crearMovimiento,
   actualizarMovimiento,
   eliminarMovimiento,
+  listarMovimientos,
+  resumenMovimientos,
+  tendenciaMovimientos,
 } from '../controllers/movimientosController';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -32,6 +35,12 @@ router.post(
   upload.single('archivo'),
   importarLibroIVA,
 );
+
+// Lectura del libro de un cliente por período (rol contador). /resumen antes que
+// el listado por prolijidad; ambos son literales y no colisionan.
+router.get('/resumen', authenticate, requireRole('contador'), resumenMovimientos);
+router.get('/tendencia', authenticate, requireRole('contador'), tendenciaMovimientos);
+router.get('/', authenticate, requireRole('contador'), listarMovimientos);
 
 // CRUD de movimientos manuales (rol contador, multi-tenant por estudio_id del token).
 router.post('/', authenticate, requireRole('contador'), crearMovimiento);

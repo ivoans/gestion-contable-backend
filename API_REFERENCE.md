@@ -864,6 +864,100 @@ Auth aplicada **por ruta** + rol **contador** (`authenticate, requireRole('conta
 
 Dos formas de poblar el libro: **importar** un `.xlsx` (`origen = 'importado'`) o **carga manual** (`origen = 'manual'`). Los importados **no** se editan/borran por API: se gestionan re-subiendo el libro (ver más abajo).
 
+**Lectura (3 GET):** listado del libro de un cliente por período, resumen recalculado del período, y serie de tendencia multi-mes. Las tres validan que el cliente exista, sea `role = cliente` y del estudio del token (si no → 404). El `periodo` se arma como `YYYY-MM-01` a partir de `anio`/`mes`.
+
+> **Montos:** Supabase puede serializar `NUMERIC` como **string**. El resumen y la tendencia hacen aritmética, así que coaccionan cada monto con `Number(...)` antes de sumar (`null`/`undefined`/no finito → `0`).
+
+#### `GET /api/movimientos`
+- **Rol:** contador.
+- **Lista los movimientos** del libro de un cliente para un período (`origen` indistinto). Array plano.
+- **Query params:**
+
+  | Param | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `cliente_id` | string (uuid) | sí | formato uuid; cliente del estudio (si no → 404) |
+  | `anio` | string→number | sí | entero entre **2024 y 2100** |
+  | `mes` | string→number | sí | entero entre **1 y 12** |
+  | `tipo` | string | no | si viene, `compra` o `venta`; otro valor → 400 |
+
+- **Orden:** `fecha` asc, luego `created_at` asc.
+- **Response 200:** array de `Movimiento` (`MOVIMIENTO_FIELDS`); `[]` si no hay.
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `cliente_id` ausente o no uuid | `{ "error": "cliente_id debe ser un uuid válido" }` |
+  | 400 | `anio` no entero o fuera de 2024–2100 | `{ "error": "anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `mes` no entero o fuera de 1–12 | `{ "error": "mes debe ser un entero entre 1 y 12" }` |
+  | 400 | `tipo` viene y ≠ `compra`/`venta` | `{ "error": "tipo debe ser 'compra' o 'venta'" }` |
+  | 404 | Cliente inexistente / de otro estudio / no es cliente | `{ "error": "Cliente no encontrado" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
+#### `GET /api/movimientos/resumen`
+- **Rol:** contador.
+- **Resumen recalculado** del período (no se persiste nada). Trae todos los movimientos del estudio+cliente+período y recalcula los headline numbers + el desglose por alícuota.
+- **Query params:** `cliente_id` (uuid, req), `anio` (req, 2024–2100), `mes` (req, 1–12). Mismas validaciones que el listado (sin `tipo`).
+- **Response 200:** objeto `ResumenLibroIVA`:
+  ```json
+  {
+    "periodo": { "anio": 2026, "mes": 4 },
+    "ventas":  { "cantidad": 1, "total": 121, "neto": 100, "iva": 21, "op_exentas": 0, "ret_perc": 0 },
+    "compras": { "cantidad": 1, "total": 55.25, "neto": 50, "iva": 5.25, "op_exentas": 0, "ret_perc": 0 },
+    "iva":     { "debito": 21, "credito": 5.25, "saldo": 15.75 },
+    "por_alicuota": [
+      { "tipo": "venta", "alicuota": 21, "neto": 100, "iva": 21, "cantidad": 1 },
+      { "tipo": "compra", "alicuota": 10.5, "neto": 50, "iva": 5.25, "cantidad": 1 }
+    ]
+  }
+  ```
+  > **`ventas`/`compras`** (bloque por `tipo`): `cantidad` = nº de movimientos; `total`/`neto`/`iva`/`op_exentas` = sumas; `ret_perc` = suma de `retenciones_percepciones`. Todo coaccionado (`null` → 0) y redondeado a 2 decimales.
+  > **`iva`:** `debito` = `ventas.iva`, `credito` = `compras.iva`, `saldo` = `debito − credito`.
+  > **`por_alicuota`:** un bucket por `(tipo, alicuota)`. La alícuota se **infiere** como `iva/neto*100` redondeado a la tasa estándar AR más cercana dentro de **±0.5** puntos (`21, 10.5, 27, 5, 2.5, 0`); si ninguna matchea → `"otras"`. Solo entran movimientos con `neto > 0` e `iva` no `null` (el resto **igual** cuenta en los totales de bloque, pero no acá). Suma `neto`/`iva` y cuenta por bucket.
+
+- **Responses de error:** iguales al listado (sin la fila de `tipo`).
+
+#### `GET /api/movimientos/tendencia`
+- **Rol:** contador.
+- **Serie multi-mes** para el gráfico de tendencia: los últimos `meses` meses terminando en `(anio, mes)` **inclusive**, en una sola query.
+- **Query params:**
+
+  | Param | Tipo | Obligatorio | Validación |
+  |---|---|---|---|
+  | `cliente_id` | string (uuid) | sí | formato uuid; cliente del estudio (si no → 404) |
+  | `anio` | string→number | sí | entero entre **2024 y 2100** |
+  | `mes` | string→number | sí | entero entre **1 y 12** |
+  | `meses` | string→number | no | entero entre **1 y 36**; **default 12** |
+
+  > Ventana de los últimos `meses` meses terminando en `(anio, mes)`. Ej: `anio=2026, mes=4, meses=12` → `2025-05` … `2026-04`. Los meses **sin movimientos** se incluyen igual con todo en `0` y `cantidad 0` (eje continuo). Si la ventana arranca antes de 2024, esos meses van en `0` (sin clamp).
+
+- **Orden:** cronológico ascendente (más viejo → más nuevo). El array tiene **exactamente `meses`** elementos.
+- **Response 200:** array de `TendenciaMes`:
+  ```json
+  [
+    {
+      "periodo": { "anio": 2026, "mes": 4 },
+      "cantidad": 2,
+      "ventas_total": 121,
+      "compras_total": 55.25,
+      "iva_debito": 21,
+      "iva_credito": 5.25,
+      "iva_saldo": 15.75
+    }
+  ]
+  ```
+  > Por mes: `cantidad` = nº de movimientos; `ventas_total`/`compras_total` = suma `total` de `venta`/`compra`; `iva_debito`/`iva_credito` = suma `iva` de `venta`/`compra`; `iva_saldo` = `debito − credito`. Coacción de montos + redondeo 2 decimales (mismos helpers que el resumen).
+
+- **Responses de error:**
+
+  | Status | Caso | Body |
+  |---|---|---|
+  | 400 | `cliente_id` ausente o no uuid | `{ "error": "cliente_id debe ser un uuid válido" }` |
+  | 400 | `anio` no entero o fuera de 2024–2100 | `{ "error": "anio debe ser un entero entre 2024 y 2100" }` |
+  | 400 | `mes` no entero o fuera de 1–12 | `{ "error": "mes debe ser un entero entre 1 y 12" }` |
+  | 400 | `meses` viene y no es entero o fuera de 1–36 | `{ "error": "meses debe ser un entero entre 1 y 36" }` |
+  | 404 | Cliente inexistente / de otro estudio / no es cliente | `{ "error": "Cliente no encontrado" }` |
+  | 500 | Error de DB | `{ "error": "Error interno del servidor" }` |
+
 #### `POST /api/movimientos/importar`
 - **Rol:** contador.
 - **Importa un libro IVA (`.xlsx`) de un cliente** para un período, con **reemplazo atómico** de los importados previos de ese libro.

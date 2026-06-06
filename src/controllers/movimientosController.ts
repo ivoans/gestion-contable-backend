@@ -3,7 +3,14 @@ import { supabase } from '../lib/supabase';
 import { normalizeCuit } from '../utils/validators';
 import { xlsxBufferAFilas } from '../utils/xlsxReader';
 import { parsearLibroIVA, RegistroLibroIVA } from '../utils/libroIvaParser';
-import { Movimiento, MovimientoTipo } from '../types';
+import {
+  Movimiento,
+  MovimientoTipo,
+  ResumenBloque,
+  ResumenLibroIVA,
+  ResumenPorAlicuota,
+  TendenciaMes,
+} from '../types';
 
 const ANIO_MIN = 2024;
 const ANIO_MAX = 2100;
@@ -452,6 +459,297 @@ export async function eliminarMovimiento(req: Request, res: Response): Promise<v
     }
 
     res.status(204).send();
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// ── LECTURA del libro de un cliente por período ──────────────────────────────
+
+// Supabase puede serializar NUMERIC como string; acá se hace aritmética, así que
+// se coerciona a number. null/undefined/no-finito → 0 (neutro en las sumas).
+function aMonto(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// Tasas de IVA estándar AR. La alícuota de un movimiento se infiere como
+// iva/neto*100 y se redondea a la más cercana dentro de ±0.5 puntos; si ninguna
+// matchea, cae en 'otras'.
+const TASAS_ESTANDAR = [21, 10.5, 27, 5, 2.5, 0];
+const TOLERANCIA_ALICUOTA = 0.5;
+
+function inferirAlicuota(neto: number, iva: number): number | 'otras' {
+  const tasa = (iva / neto) * 100;
+  let mejor: number | null = null;
+  let mejorDiff = Infinity;
+  for (const std of TASAS_ESTANDAR) {
+    const diff = Math.abs(tasa - std);
+    if (diff < mejorDiff) {
+      mejorDiff = diff;
+      mejor = std;
+    }
+  }
+  return mejor !== null && mejorDiff <= TOLERANCIA_ALICUOTA ? mejor : 'otras';
+}
+
+// Suma un bloque (ventas o compras): cantidad + totales coercionados y redondeados.
+function calcularBloque(movs: Movimiento[]): ResumenBloque {
+  let total = 0;
+  let neto = 0;
+  let iva = 0;
+  let op_exentas = 0;
+  let ret_perc = 0;
+  for (const m of movs) {
+    total += aMonto(m.total);
+    neto += aMonto(m.neto);
+    iva += aMonto(m.iva);
+    op_exentas += aMonto(m.op_exentas);
+    ret_perc += aMonto(m.retenciones_percepciones);
+  }
+  return {
+    cantidad: movs.length,
+    total: round2(total),
+    neto: round2(neto),
+    iva: round2(iva),
+    op_exentas: round2(op_exentas),
+    ret_perc: round2(ret_perc),
+  };
+}
+
+// Agrupa por (tipo, alícuota inferida). Solo entran movimientos con neto>0 e iva
+// no null; el resto igual cuenta en los totales de bloque, pero no acá.
+function calcularPorAlicuota(movs: Movimiento[]): ResumenPorAlicuota[] {
+  const grupos = new Map<string, ResumenPorAlicuota>();
+  for (const m of movs) {
+    if (m.iva === null || m.iva === undefined) continue;
+    const neto = aMonto(m.neto);
+    if (neto <= 0) continue;
+    const iva = aMonto(m.iva);
+    const alicuota = inferirAlicuota(neto, iva);
+    const key = `${m.tipo}|${alicuota}`;
+    const grupo = grupos.get(key);
+    if (grupo) {
+      grupo.neto = round2(grupo.neto + neto);
+      grupo.iva = round2(grupo.iva + iva);
+      grupo.cantidad += 1;
+    } else {
+      grupos.set(key, { tipo: m.tipo, alicuota, neto: round2(neto), iva: round2(iva), cantidad: 1 });
+    }
+  }
+  return [...grupos.values()];
+}
+
+function calcularResumen(movs: Movimiento[], anio: number, mes: number): ResumenLibroIVA {
+  const ventas = calcularBloque(movs.filter((m) => m.tipo === 'venta'));
+  const compras = calcularBloque(movs.filter((m) => m.tipo === 'compra'));
+  return {
+    periodo: { anio, mes },
+    ventas,
+    compras,
+    iva: { debito: ventas.iva, credito: compras.iva, saldo: round2(ventas.iva - compras.iva) },
+    por_alicuota: calcularPorAlicuota(movs),
+  };
+}
+
+// Valida cliente_id (uuid), anio/mes (par → periodo DATE) y, en el listado, tipo.
+// Devuelve { cliente_id, periodo, anio, mes, tipo } o responde el 400 y devuelve null.
+function validarQueryLibro(
+  req: Request,
+  res: Response,
+  conTipo: boolean,
+): { cliente_id: string; periodo: string; anio: number; mes: number; tipo?: MovimientoTipo } | null {
+  const { cliente_id, tipo } = req.query as { cliente_id?: string; tipo?: string };
+
+  if (typeof cliente_id !== 'string' || !UUID_REGEX.test(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return null;
+  }
+
+  const anio = Number(req.query.anio);
+  const mes = Number(req.query.mes);
+  const periodoResult = validarPeriodo(anio, mes);
+  if ('error' in periodoResult) {
+    res.status(400).json({ error: periodoResult.error });
+    return null;
+  }
+
+  let tipoValido: MovimientoTipo | undefined;
+  if (conTipo && tipo !== undefined) {
+    if (!TIPOS_VALIDOS.includes(tipo as MovimientoTipo)) {
+      res.status(400).json({ error: "tipo debe ser 'compra' o 'venta'" });
+      return null;
+    }
+    tipoValido = tipo as MovimientoTipo;
+  }
+
+  return { cliente_id, periodo: periodoResult.periodo, anio, mes, tipo: tipoValido };
+}
+
+// El cliente debe existir, ser cliente y del estudio del token. Devuelve true si OK;
+// si no, responde (404/500) y devuelve false.
+async function verificarCliente(estudio_id: string | null, cliente_id: string, res: Response): Promise<boolean> {
+  const { data: cliente, error } = await supabase
+    .from('users')
+    .select('id')
+    .eq('id', cliente_id)
+    .eq('role', 'cliente')
+    .eq('estudio_id', estudio_id)
+    .maybeSingle();
+
+  if (error) {
+    res.status(500).json({ error: 'Error interno del servidor' });
+    return false;
+  }
+  if (!cliente) {
+    res.status(404).json({ error: 'Cliente no encontrado' });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/movimientos — listado del libro de un cliente por período.
+export async function listarMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const q = validarQueryLibro(req, res, true);
+  if (!q) return;
+
+  try {
+    if (!(await verificarCliente(estudio_id, q.cliente_id, res))) return;
+
+    let query = supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', q.cliente_id)
+      .eq('periodo', q.periodo);
+
+    if (q.tipo) query = query.eq('tipo', q.tipo);
+
+    const { data, error } = await query
+      .order('fecha', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json((data ?? []) as unknown as Movimiento[]);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// GET /api/movimientos/resumen — resumen recalculado del período (no se persiste).
+export async function resumenMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const q = validarQueryLibro(req, res, false);
+  if (!q) return;
+
+  try {
+    if (!(await verificarCliente(estudio_id, q.cliente_id, res))) return;
+
+    const { data, error } = await supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', q.cliente_id)
+      .eq('periodo', q.periodo);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const movimientos = ((data ?? []) as unknown) as Movimiento[];
+    res.json(calcularResumen(movimientos, q.anio, q.mes));
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+const MESES_MIN = 1;
+const MESES_MAX = 36;
+const MESES_DEFAULT = 12;
+
+// Headline numbers de un período (mes) reusando calcularBloque.
+function tendenciaDelMes(anio: number, mes: number, movs: Movimiento[]): TendenciaMes {
+  const ventas = calcularBloque(movs.filter((m) => m.tipo === 'venta'));
+  const compras = calcularBloque(movs.filter((m) => m.tipo === 'compra'));
+  return {
+    periodo: { anio, mes },
+    cantidad: movs.length,
+    ventas_total: ventas.total,
+    compras_total: compras.total,
+    iva_debito: ventas.iva,
+    iva_credito: compras.iva,
+    iva_saldo: round2(ventas.iva - compras.iva),
+  };
+}
+
+// GET /api/movimientos/tendencia — serie de los últimos `meses` meses terminando
+// en (anio, mes) inclusive. Los meses sin datos van en 0 (eje continuo).
+export async function tendenciaMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const q = validarQueryLibro(req, res, false);
+  if (!q) return;
+
+  let meses = MESES_DEFAULT;
+  if (req.query.meses !== undefined) {
+    meses = Number(req.query.meses);
+    if (!Number.isInteger(meses) || meses < MESES_MIN || meses > MESES_MAX) {
+      res.status(400).json({ error: `meses debe ser un entero entre ${MESES_MIN} y ${MESES_MAX}` });
+      return;
+    }
+  }
+
+  // Ventana cronológica (más viejo → más nuevo) terminando en (anio, mes) inclusive.
+  const ventana: { anio: number; mes: number; periodo: string }[] = [];
+  const finIdx = q.anio * 12 + (q.mes - 1);
+  for (let i = meses - 1; i >= 0; i--) {
+    const idx = finIdx - i;
+    const anio = Math.floor(idx / 12);
+    const mes = (idx % 12) + 1;
+    ventana.push({ anio, mes, periodo: `${anio}-${String(mes).padStart(2, '0')}-01` });
+  }
+
+  try {
+    if (!(await verificarCliente(estudio_id, q.cliente_id, res))) return;
+
+    // Una sola query: todos los movimientos del estudio+cliente dentro de la ventana.
+    const { data, error } = await supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', q.cliente_id)
+      .gte('periodo', ventana[0].periodo)
+      .lte('periodo', ventana[ventana.length - 1].periodo);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const movimientos = ((data ?? []) as unknown) as Movimiento[];
+
+    // Agrupar por periodo (DATE serializado 'YYYY-MM-01').
+    const porPeriodo = new Map<string, Movimiento[]>();
+    for (const m of movimientos) {
+      const arr = porPeriodo.get(m.periodo);
+      if (arr) arr.push(m);
+      else porPeriodo.set(m.periodo, [m]);
+    }
+
+    const serie = ventana.map(({ anio, mes, periodo }) =>
+      tendenciaDelMes(anio, mes, porPeriodo.get(periodo) ?? []),
+    );
+
+    res.json(serie);
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }

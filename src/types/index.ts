@@ -80,6 +80,52 @@ export interface Movimiento {
   created_at: string;
 }
 
+// Resumen recalculado del libro IVA de un cliente por período (no se persiste).
+// Las alícuotas se infieren de iva/neto y se redondean a la tasa estándar AR más
+// cercana; las que no matchean caen en el bucket 'otras'.
+export interface ResumenBloque {
+  cantidad: number;
+  total: number;
+  neto: number;
+  iva: number;
+  op_exentas: number;
+  ret_perc: number;
+}
+
+export interface ResumenIva {
+  debito: number;
+  credito: number;
+  saldo: number;
+}
+
+export interface ResumenPorAlicuota {
+  tipo: MovimientoTipo;
+  alicuota: number | 'otras';
+  neto: number;
+  iva: number;
+  cantidad: number;
+}
+
+export interface ResumenLibroIVA {
+  periodo: { anio: number; mes: number };
+  ventas: ResumenBloque;
+  compras: ResumenBloque;
+  iva: ResumenIva;
+  por_alicuota: ResumenPorAlicuota[];
+}
+
+// Un mes de la serie de tendencia multi-mes (headline numbers por período).
+// Los meses sin movimientos van igual con todo en 0 para que el eje sea continuo.
+export interface TendenciaMes {
+  periodo: { anio: number; mes: number };
+  cantidad: number;
+  ventas_total: number;
+  compras_total: number;
+  iva_debito: number;
+  iva_credito: number;
+  iva_saldo: number;
+}
+
 export interface Notificacion {
   id: string;
   impuesto_id: string;
