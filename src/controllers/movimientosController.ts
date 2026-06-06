@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { normalizeCuit } from '../utils/validators';
 import { xlsxBufferAFilas } from '../utils/xlsxReader';
 import { parsearLibroIVA, RegistroLibroIVA } from '../utils/libroIvaParser';
+import { Movimiento, MovimientoTipo } from '../types';
 
 const ANIO_MIN = 2024;
 const ANIO_MAX = 2100;
@@ -159,6 +160,298 @@ export async function importarLibroIVA(req: Request, res: Response): Promise<voi
       reemplazados: borrados,
       validacion: { ok: true },
     });
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// ── CRUD de movimientos MANUALES (origen='manual') ───────────────────────────
+
+// Todas las columnas de la tabla movimientos; shape devuelto en las respuestas.
+const MOVIMIENTO_FIELDS =
+  'id, estudio_id, cliente_id, tipo, periodo, fecha, tipo_comprobante, letra, numero, ' +
+  'contraparte, cuit_contraparte, neto, concepto_no_gravado, iva, acrecentamiento, total, ' +
+  'retenciones_percepciones, op_exentas, origen, creado_por, created_at';
+
+const TIPOS_VALIDOS: MovimientoTipo[] = ['compra', 'venta'];
+
+// Strings libres del comprobante.
+const STRING_OPCIONALES = [
+  'tipo_comprobante', 'letra', 'numero', 'contraparte', 'cuit_contraparte',
+] as const;
+
+// Montos opcionales: si vienen, number finito o null. NO se valida positividad
+// (notas de crédito / negativos son válidos). concepto_no_gravado y acrecentamiento,
+// si NO vienen, quedan en el default 0 del schema (no se incluyen en el payload).
+const MONTO_OPCIONALES = [
+  'neto', 'concepto_no_gravado', 'iva', 'acrecentamiento', 'retenciones_percepciones', 'op_exentas',
+] as const;
+
+function esNumeroFinito(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function esFechaValida(v: unknown): v is string {
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(Date.parse(v));
+}
+
+// Valida anio+mes como par y devuelve el periodo DATE (primer día del mes) o un error.
+function validarPeriodo(anioRaw: unknown, mesRaw: unknown): { periodo: string } | { error: string } {
+  if (!Number.isInteger(anioRaw) || (anioRaw as number) < ANIO_MIN || (anioRaw as number) > ANIO_MAX) {
+    return { error: `anio debe ser un entero entre ${ANIO_MIN} y ${ANIO_MAX}` };
+  }
+  if (!Number.isInteger(mesRaw) || (mesRaw as number) < 1 || (mesRaw as number) > 12) {
+    return { error: 'mes debe ser un entero entre 1 y 12' };
+  }
+  return { periodo: `${anioRaw}-${String(mesRaw).padStart(2, '0')}-01` };
+}
+
+// Valida los campos opcionales comunes (strings y montos) y los vuelca en `target`.
+// Devuelve un mensaje de error si algo no valida, o null si todo OK.
+function recolectarOpcionales(body: Record<string, unknown>, target: Record<string, unknown>): string | null {
+  for (const campo of STRING_OPCIONALES) {
+    if (body[campo] !== undefined) {
+      if (body[campo] !== null && typeof body[campo] !== 'string') {
+        return `${campo} debe ser un string`;
+      }
+      target[campo] = body[campo];
+    }
+  }
+  for (const campo of MONTO_OPCIONALES) {
+    if (body[campo] !== undefined) {
+      if (body[campo] !== null && !esNumeroFinito(body[campo])) {
+        return `${campo} debe ser un número finito o null`;
+      }
+      target[campo] = body[campo];
+    }
+  }
+  return null;
+}
+
+// POST /api/movimientos — crea un movimiento manual (origen='manual').
+export async function crearMovimiento(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { cliente_id, tipo, anio, mes, fecha, total } = body;
+
+  if (typeof cliente_id !== 'string' || !UUID_REGEX.test(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return;
+  }
+
+  if (!TIPOS_VALIDOS.includes(tipo as MovimientoTipo)) {
+    res.status(400).json({ error: "tipo debe ser 'compra' o 'venta'" });
+    return;
+  }
+
+  const periodoResult = validarPeriodo(anio, mes);
+  if ('error' in periodoResult) {
+    res.status(400).json({ error: periodoResult.error });
+    return;
+  }
+
+  if (!esFechaValida(fecha)) {
+    res.status(400).json({ error: 'fecha debe tener formato YYYY-MM-DD' });
+    return;
+  }
+
+  if (!esNumeroFinito(total)) {
+    res.status(400).json({ error: 'total es requerido y debe ser un número finito' });
+    return;
+  }
+
+  const row: Record<string, unknown> = {
+    estudio_id,
+    cliente_id,
+    tipo,
+    periodo: periodoResult.periodo,
+    fecha,
+    total,
+    origen: 'manual',
+    creado_por: req.user!.id,
+  };
+
+  const errorOpcional = recolectarOpcionales(body, row);
+  if (errorOpcional) {
+    res.status(400).json({ error: errorOpcional });
+    return;
+  }
+
+  try {
+    // El cliente debe existir, ser cliente y del estudio del token.
+    const { data: cliente, error: clienteError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', cliente_id)
+      .eq('role', 'cliente')
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (clienteError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    if (!cliente) {
+      res.status(404).json({ error: 'Cliente no encontrado' });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('movimientos')
+      .insert(row)
+      .select(MOVIMIENTO_FIELDS)
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.status(201).json(data as unknown as Movimiento);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// PATCH /api/movimientos/:id — edita un movimiento MANUAL del estudio.
+export async function actualizarMovimiento(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const estudio_id = req.user!.estudio_id;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { tipo, anio, mes, fecha, total } = body;
+
+  const updates: Record<string, unknown> = {};
+
+  if (tipo !== undefined) {
+    if (!TIPOS_VALIDOS.includes(tipo as MovimientoTipo)) {
+      res.status(400).json({ error: "tipo debe ser 'compra' o 'venta'" });
+      return;
+    }
+    updates.tipo = tipo;
+  }
+
+  // Período: si viene anio o mes, se exigen ambos para recomponerlo.
+  if (anio !== undefined || mes !== undefined) {
+    const periodoResult = validarPeriodo(anio, mes);
+    if ('error' in periodoResult) {
+      res.status(400).json({ error: periodoResult.error });
+      return;
+    }
+    updates.periodo = periodoResult.periodo;
+  }
+
+  if (fecha !== undefined) {
+    if (!esFechaValida(fecha)) {
+      res.status(400).json({ error: 'fecha debe tener formato YYYY-MM-DD' });
+      return;
+    }
+    updates.fecha = fecha;
+  }
+
+  if (total !== undefined) {
+    if (!esNumeroFinito(total)) {
+      res.status(400).json({ error: 'total debe ser un número finito' });
+      return;
+    }
+    updates.total = total;
+  }
+
+  const errorOpcional = recolectarOpcionales(body, updates);
+  if (errorOpcional) {
+    res.status(400).json({ error: errorOpcional });
+    return;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No se enviaron campos para actualizar' });
+    return;
+  }
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('movimientos')
+      .select('id, origen')
+      .eq('id', id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    if (!existing) {
+      res.status(404).json({ error: 'Movimiento no encontrado' });
+      return;
+    }
+
+    if ((existing as { origen: string }).origen === 'importado') {
+      res.status(400).json({
+        error: 'No se puede editar un movimiento importado; los importados se gestionan re-subiendo el libro',
+      });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('movimientos')
+      .update(updates)
+      .eq('id', id)
+      .select(MOVIMIENTO_FIELDS)
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data as unknown as Movimiento);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// DELETE /api/movimientos/:id — borra un movimiento MANUAL del estudio.
+export async function eliminarMovimiento(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const estudio_id = req.user!.estudio_id;
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('movimientos')
+      .select('id, origen')
+      .eq('id', id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    if (!existing) {
+      res.status(404).json({ error: 'Movimiento no encontrado' });
+      return;
+    }
+
+    if ((existing as { origen: string }).origen === 'importado') {
+      res.status(400).json({
+        error: 'No se puede eliminar un movimiento importado; los importados se gestionan re-subiendo el libro',
+      });
+      return;
+    }
+
+    const { error } = await supabase
+      .from('movimientos')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.status(204).send();
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }

@@ -53,6 +53,33 @@ export interface Vencimiento {
   created_at: string;
 }
 
+export type MovimientoTipo = 'compra' | 'venta';
+export type MovimientoOrigen = 'importado' | 'manual';
+
+export interface Movimiento {
+  id: string;
+  estudio_id: string;
+  cliente_id: string;
+  tipo: MovimientoTipo;
+  periodo: string;
+  fecha: string;
+  tipo_comprobante: string | null;
+  letra: string | null;
+  numero: string | null;
+  contraparte: string | null;
+  cuit_contraparte: string | null;
+  neto: number | null;
+  concepto_no_gravado: number;
+  iva: number | null;
+  acrecentamiento: number;
+  total: number;
+  retenciones_percepciones: number | null;
+  op_exentas: number | null;
+  origen: MovimientoOrigen;
+  creado_por: string | null;
+  created_at: string;
+}
+
 export interface Notificacion {
   id: string;
   impuesto_id: string;

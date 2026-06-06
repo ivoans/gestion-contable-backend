@@ -2,7 +2,12 @@ import { Router } from 'express';
 import multer from 'multer';
 import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
-import { importarLibroIVA } from '../controllers/movimientosController';
+import {
+  importarLibroIVA,
+  crearMovimiento,
+  actualizarMovimiento,
+  eliminarMovimiento,
+} from '../controllers/movimientosController';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -27,5 +32,10 @@ router.post(
   upload.single('archivo'),
   importarLibroIVA,
 );
+
+// CRUD de movimientos manuales (rol contador, multi-tenant por estudio_id del token).
+router.post('/', authenticate, requireRole('contador'), crearMovimiento);
+router.patch('/:id', authenticate, requireRole('contador'), actualizarMovimiento);
+router.delete('/:id', authenticate, requireRole('contador'), eliminarMovimiento);
 
 export default router;

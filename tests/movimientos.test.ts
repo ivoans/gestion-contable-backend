@@ -23,6 +23,33 @@ import { createApp } from '../src/app';
 // uuids reales (el endpoint valida formato uuid en cliente_id).
 const CLIENTE_A = '11111111-1111-4111-8111-111111111111';
 const CLIENTE_OTRO = '22222222-2222-4222-8222-222222222222';
+const MOV_ID = '33333333-3333-4333-8333-333333333333';
+
+// Fila de movimiento con shape MOVIMIENTO_FIELDS (todas las columnas de la tabla).
+const makeMov = (over: Record<string, unknown> = {}) => ({
+  id: MOV_ID,
+  estudio_id: 'estudio-A',
+  cliente_id: CLIENTE_A,
+  tipo: 'compra',
+  periodo: '2026-04-01',
+  fecha: '2026-04-05',
+  tipo_comprobante: null,
+  letra: null,
+  numero: null,
+  contraparte: null,
+  cuit_contraparte: null,
+  neto: null,
+  concepto_no_gravado: 0,
+  iva: null,
+  acrecentamiento: 0,
+  total: 121,
+  retenciones_percepciones: null,
+  op_exentas: null,
+  origen: 'manual',
+  creado_por: 'contadorA',
+  created_at: '2026-04-05T12:00:00.000Z',
+  ...over,
+});
 
 describe('movimientos — POST /api/movimientos/importar', () => {
   let app: ReturnType<typeof createApp>;
@@ -270,5 +297,331 @@ describe('movimientos — POST /api/movimientos/importar', () => {
     // DD/MM/YYYY → YYYY-MM-DD.
     expect(rpc.args.p_registros[1].fecha).toBe('2026-04-05');
     expect(rpc.args.p_registros[1].retenciones_percepciones).toBe(10);
+  });
+});
+
+describe('movimientos — CRUD manual', () => {
+  let app: ReturnType<typeof createApp>;
+
+  const contadorA = makeUser({ id: 'contadorA', role: 'contador', estudio_id: 'estudio-A' });
+  const contadorB = makeUser({ id: 'contadorB', role: 'contador', estudio_id: 'estudio-B' });
+  const admin = makeUser({ role: 'admin' });
+  const clienteUser = makeUser({ id: CLIENTE_A, role: 'cliente', estudio_id: 'estudio-A' });
+
+  const authA = bearerFor(contadorA);
+  const authB = bearerFor(contadorB);
+  const adminAuth = bearerFor(admin);
+  const clienteAuth = bearerFor(clienteUser);
+
+  // Body válido mínimo para crear un movimiento manual.
+  const validBody = (over: Record<string, unknown> = {}) => ({
+    cliente_id: CLIENTE_A,
+    tipo: 'compra',
+    anio: 2026,
+    mes: 4,
+    fecha: '2026-04-05',
+    total: 121,
+    ...over,
+  });
+
+  beforeEach(() => {
+    sb.reset();
+    app = createApp();
+  });
+
+  // ── POST /api/movimientos ────────────────────────────────────────────────────
+  describe('POST /api/movimientos', () => {
+    const post = (auth: string | null, body: unknown) => {
+      let r = request(app).post('/api/movimientos');
+      if (auth) r = r.set('Authorization', auth);
+      return r.send(body as object);
+    };
+
+    it('401 sin token', async () => {
+      const res = await post(null, validBody());
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await post(clienteAuth, validBody());
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await post(adminAuth, validBody());
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si falta cliente_id', async () => {
+      const res = await post(authA, validBody({ cliente_id: undefined }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si cliente_id no es uuid', async () => {
+      const res = await post(authA, validBody({ cliente_id: 'no-uuid' }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si tipo es inválido', async () => {
+      const res = await post(authA, validBody({ tipo: 'otro' }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio fuera de rango', async () => {
+      const res = await post(authA, validBody({ anio: 1999 }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si mes inválido', async () => {
+      const res = await post(authA, validBody({ mes: 13 }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si fecha mal formada', async () => {
+      const res = await post(authA, validBody({ fecha: '05/04/2026' }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si falta total', async () => {
+      const res = await post(authA, validBody({ total: undefined }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si total no es finito', async () => {
+      const res = await post(authA, validBody({ total: 'x' }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si un monto opcional no es finito', async () => {
+      const res = await post(authA, validBody({ neto: 'x' }));
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si el cliente es de otro estudio', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+      const res = await post(authB, validBody());
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Cliente no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+    });
+
+    it('404 si el cliente no existe / no es cliente', async () => {
+      sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+      const res = await post(authA, validBody({ cliente_id: CLIENTE_OTRO }));
+      expect(res.status).toBe(404);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'role', 'cliente']);
+    });
+
+    it('201 acepta total NEGATIVO (notas de crédito)', async () => {
+      sb.queue([
+        { table: 'users', result: { data: { id: CLIENTE_A }, error: null } },
+        { table: 'movimientos', result: { data: makeMov({ total: -500 }), error: null } },
+      ]);
+      const res = await post(authA, validBody({ total: -500 }));
+      expect(res.status).toBe(201);
+      expect(res.body.total).toBe(-500);
+      expect(sb.calls[1].payload.total).toBe(-500);
+    });
+
+    it('201 crea: fuerza origen/estudio/creado_por y devuelve shape MOVIMIENTO_FIELDS', async () => {
+      sb.queue([
+        { table: 'users', result: { data: { id: CLIENTE_A }, error: null } },
+        { table: 'movimientos', result: { data: makeMov(), error: null } },
+      ]);
+      const res = await post(authA, validBody());
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual(makeMov());
+
+      // El insert fija el contexto del token + período recompuesto; los defaults
+      // (concepto_no_gravado / acrecentamiento) NO se mandan → quedan en 0 por schema.
+      const payload = sb.calls[1].payload;
+      expect(payload).toMatchObject({
+        estudio_id: 'estudio-A',
+        cliente_id: CLIENTE_A,
+        tipo: 'compra',
+        periodo: '2026-04-01',
+        fecha: '2026-04-05',
+        total: 121,
+        origen: 'manual',
+        creado_por: 'contadorA',
+      });
+      expect(payload).not.toHaveProperty('concepto_no_gravado');
+      expect(payload).not.toHaveProperty('acrecentamiento');
+    });
+  });
+
+  // ── PATCH /api/movimientos/:id ───────────────────────────────────────────────
+  describe('PATCH /api/movimientos/:id', () => {
+    const patch = (auth: string | null, id: string, body: unknown) => {
+      let r = request(app).patch(`/api/movimientos/${id}`);
+      if (auth) r = r.set('Authorization', auth);
+      return r.send(body as object);
+    };
+
+    it('401 sin token', async () => {
+      const res = await patch(null, MOV_ID, { total: 1 });
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await patch(clienteAuth, MOV_ID, { total: 1 });
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await patch(adminAuth, MOV_ID, { total: 1 });
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si no se envió ningún campo', async () => {
+      const res = await patch(authA, MOV_ID, {});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('No se enviaron campos para actualizar');
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si tipo es inválido', async () => {
+      const res = await patch(authA, MOV_ID, { tipo: 'otro' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si viene anio sin mes', async () => {
+      const res = await patch(authA, MOV_ID, { anio: 2026 });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si fecha mal formada', async () => {
+      const res = await patch(authA, MOV_ID, { fecha: 'x' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si total no es finito', async () => {
+      const res = await patch(authA, MOV_ID, { total: 'x' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si un monto opcional no es finito', async () => {
+      const res = await patch(authA, MOV_ID, { neto: 'x' });
+      expect(res.status).toBe(400);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si no existe / otro estudio', async () => {
+      sb.queue([{ table: 'movimientos', result: { data: null, error: null } }]);
+      const res = await patch(authB, MOV_ID, { total: 200 });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Movimiento no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+    });
+
+    it('400 si el movimiento es importado', async () => {
+      sb.queue([{ table: 'movimientos', result: { data: { id: MOV_ID, origen: 'importado' }, error: null } }]);
+      const res = await patch(authA, MOV_ID, { total: 200 });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        'No se puede editar un movimiento importado; los importados se gestionan re-subiendo el libro',
+      );
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('200 acepta total NEGATIVO', async () => {
+      sb.queue([
+        { table: 'movimientos', result: { data: { id: MOV_ID, origen: 'manual' }, error: null } },
+        { table: 'movimientos', result: { data: makeMov({ total: -500 }), error: null } },
+      ]);
+      const res = await patch(authA, MOV_ID, { total: -500 });
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(-500);
+      expect(sb.calls[1].payload.total).toBe(-500);
+    });
+
+    it('200 actualiza y devuelve shape MOVIMIENTO_FIELDS', async () => {
+      sb.queue([
+        { table: 'movimientos', result: { data: { id: MOV_ID, origen: 'manual' }, error: null } },
+        { table: 'movimientos', result: { data: makeMov({ tipo: 'venta' }), error: null } },
+      ]);
+      const res = await patch(authA, MOV_ID, { tipo: 'venta', anio: 2026, mes: 5 });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(makeMov({ tipo: 'venta' }));
+      expect(sb.calls[1].op).toBe('update');
+      expect(sb.calls[1].payload).toEqual({ tipo: 'venta', periodo: '2026-05-01' });
+    });
+  });
+
+  // ── DELETE /api/movimientos/:id ──────────────────────────────────────────────
+  describe('DELETE /api/movimientos/:id', () => {
+    const del = (auth: string | null, id: string) => {
+      let r = request(app).delete(`/api/movimientos/${id}`);
+      if (auth) r = r.set('Authorization', auth);
+      return r;
+    };
+
+    it('401 sin token', async () => {
+      const res = await del(null, MOV_ID);
+      expect(res.status).toBe(401);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=cliente', async () => {
+      const res = await del(clienteAuth, MOV_ID);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si role=admin', async () => {
+      const res = await del(adminAuth, MOV_ID);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('404 si no existe / otro estudio', async () => {
+      sb.queue([{ table: 'movimientos', result: { data: null, error: null } }]);
+      const res = await del(authB, MOV_ID);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Movimiento no encontrado');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
+    });
+
+    it('400 si el movimiento es importado', async () => {
+      sb.queue([{ table: 'movimientos', result: { data: { id: MOV_ID, origen: 'importado' }, error: null } }]);
+      const res = await del(authA, MOV_ID);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe(
+        'No se puede eliminar un movimiento importado; los importados se gestionan re-subiendo el libro',
+      );
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('204 borra un movimiento manual', async () => {
+      sb.queue([
+        { table: 'movimientos', result: { data: { id: MOV_ID, origen: 'manual' }, error: null } },
+        { table: 'movimientos', result: { data: null, error: null } },
+      ]);
+      const res = await del(authA, MOV_ID);
+      expect(res.status).toBe(204);
+      expect(res.body).toEqual({});
+      expect(sb.calls[1].op).toBe('delete');
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'id', MOV_ID]);
+    });
   });
 });
