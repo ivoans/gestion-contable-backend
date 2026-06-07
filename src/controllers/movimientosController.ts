@@ -754,3 +754,157 @@ export async function tendenciaMovimientos(req: Request, res: Response): Promise
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 }
+
+// ── LECTURA del PROPIO libro del CLIENTE logueado (rol cliente, solo lectura) ─
+// cliente_id sale del token (req.user.id), NUNCA de la query: si llega un
+// cliente_id por query se IGNORA. Multi-tenant por estudio_id del token. Reusa los
+// mismos helpers de cálculo que los endpoints de contador (calcularResumen,
+// tendenciaDelMes, etc.); solo cambia de dónde sale el cliente_id. El cliente ve
+// todos sus movimientos (manual e importado) sin alta/edición/borrado.
+
+// Valida anio/mes (par → periodo DATE) y, en el listado, tipo. NO lee cliente_id.
+// Devuelve { periodo, anio, mes, tipo } o responde el 400 y devuelve null.
+function validarQueryMisMovimientos(
+  req: Request,
+  res: Response,
+  conTipo: boolean,
+): { periodo: string; anio: number; mes: number; tipo?: MovimientoTipo } | null {
+  const anio = Number(req.query.anio);
+  const mes = Number(req.query.mes);
+  const periodoResult = validarPeriodo(anio, mes);
+  if ('error' in periodoResult) {
+    res.status(400).json({ error: periodoResult.error });
+    return null;
+  }
+
+  let tipoValido: MovimientoTipo | undefined;
+  const { tipo } = req.query as { tipo?: string };
+  if (conTipo && tipo !== undefined) {
+    if (!TIPOS_VALIDOS.includes(tipo as MovimientoTipo)) {
+      res.status(400).json({ error: "tipo debe ser 'compra' o 'venta'" });
+      return null;
+    }
+    tipoValido = tipo as MovimientoTipo;
+  }
+
+  return { periodo: periodoResult.periodo, anio, mes, tipo: tipoValido };
+}
+
+// GET /api/movimientos/mis-movimientos — el cliente lee su propio libro por período.
+export async function listarMisMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const cliente_id = req.user!.id;
+  const q = validarQueryMisMovimientos(req, res, true);
+  if (!q) return;
+
+  try {
+    let query = supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', cliente_id)
+      .eq('periodo', q.periodo);
+
+    if (q.tipo) query = query.eq('tipo', q.tipo);
+
+    const { data, error } = await query
+      .order('fecha', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json((data ?? []) as unknown as Movimiento[]);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// GET /api/movimientos/mis-movimientos/resumen — resumen recalculado del cliente.
+export async function resumenMisMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const cliente_id = req.user!.id;
+  const q = validarQueryMisMovimientos(req, res, false);
+  if (!q) return;
+
+  try {
+    const { data, error } = await supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', cliente_id)
+      .eq('periodo', q.periodo);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const movimientos = ((data ?? []) as unknown) as Movimiento[];
+    res.json(calcularResumen(movimientos, q.anio, q.mes));
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// GET /api/movimientos/mis-movimientos/tendencia — serie de los últimos `meses`
+// meses (default 12) del cliente, misma ventana/cálculo que tendenciaMovimientos.
+export async function tendenciaMisMovimientos(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const cliente_id = req.user!.id;
+  const q = validarQueryMisMovimientos(req, res, false);
+  if (!q) return;
+
+  let meses = MESES_DEFAULT;
+  if (req.query.meses !== undefined) {
+    meses = Number(req.query.meses);
+    if (!Number.isInteger(meses) || meses < MESES_MIN || meses > MESES_MAX) {
+      res.status(400).json({ error: `meses debe ser un entero entre ${MESES_MIN} y ${MESES_MAX}` });
+      return;
+    }
+  }
+
+  // Ventana cronológica (más viejo → más nuevo) terminando en (anio, mes) inclusive.
+  const ventana: { anio: number; mes: number; periodo: string }[] = [];
+  const finIdx = q.anio * 12 + (q.mes - 1);
+  for (let i = meses - 1; i >= 0; i--) {
+    const idx = finIdx - i;
+    const anio = Math.floor(idx / 12);
+    const mes = (idx % 12) + 1;
+    ventana.push({ anio, mes, periodo: `${anio}-${String(mes).padStart(2, '0')}-01` });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('movimientos')
+      .select(MOVIMIENTO_FIELDS)
+      .eq('estudio_id', estudio_id)
+      .eq('cliente_id', cliente_id)
+      .gte('periodo', ventana[0].periodo)
+      .lte('periodo', ventana[ventana.length - 1].periodo);
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const movimientos = ((data ?? []) as unknown) as Movimiento[];
+
+    const porPeriodo = new Map<string, Movimiento[]>();
+    for (const m of movimientos) {
+      const arr = porPeriodo.get(m.periodo);
+      if (arr) arr.push(m);
+      else porPeriodo.set(m.periodo, [m]);
+    }
+
+    const serie = ventana.map(({ anio, mes, periodo }) =>
+      tendenciaDelMes(anio, mes, porPeriodo.get(periodo) ?? []),
+    );
+
+    res.json(serie);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}

@@ -10,6 +10,9 @@ import {
   listarMovimientos,
   resumenMovimientos,
   tendenciaMovimientos,
+  listarMisMovimientos,
+  resumenMisMovimientos,
+  tendenciaMisMovimientos,
 } from '../controllers/movimientosController';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -41,6 +44,14 @@ router.post(
 router.get('/resumen', authenticate, requireRole('contador'), resumenMovimientos);
 router.get('/tendencia', authenticate, requireRole('contador'), tendenciaMovimientos);
 router.get('/', authenticate, requireRole('contador'), listarMovimientos);
+
+// Lectura del PROPIO libro (rol cliente). cliente_id sale del token, no de la query.
+// Rutas estáticas /mis-movimientos/... declaradas antes que el /:id de abajo para
+// que ningún segmento se confunda con un parámetro. /resumen y /tendencia antes que
+// el listado por prolijidad; todos son literales y no colisionan.
+router.get('/mis-movimientos/resumen', authenticate, requireRole('cliente'), resumenMisMovimientos);
+router.get('/mis-movimientos/tendencia', authenticate, requireRole('cliente'), tendenciaMisMovimientos);
+router.get('/mis-movimientos', authenticate, requireRole('cliente'), listarMisMovimientos);
 
 // CRUD de movimientos manuales (rol contador, multi-tenant por estudio_id del token).
 router.post('/', authenticate, requireRole('contador'), crearMovimiento);
