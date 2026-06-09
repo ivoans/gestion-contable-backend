@@ -692,6 +692,36 @@ function tendenciaDelMes(anio: number, mes: number, movs: Movimiento[]): Tendenc
   };
 }
 
+type MesVentana = { anio: number; mes: number; periodo: string };
+
+// Ventana cronológica (más viejo → más nuevo) de `meses` meses terminando en
+// (anio, mes) inclusive. Cada entrada trae su periodo DATE serializado 'YYYY-MM-01'.
+function construirVentanaMeses(anio: number, mes: number, meses: number): MesVentana[] {
+  const ventana: MesVentana[] = [];
+  const finIdx = anio * 12 + (mes - 1);
+  for (let i = meses - 1; i >= 0; i--) {
+    const idx = finIdx - i;
+    const a = Math.floor(idx / 12);
+    const m = (idx % 12) + 1;
+    ventana.push({ anio: a, mes: m, periodo: `${a}-${String(m).padStart(2, '0')}-01` });
+  }
+  return ventana;
+}
+
+// Agrupa los movimientos por periodo y arma la serie: un TendenciaMes por mes de
+// la ventana, en su orden cronológico, con los meses sin datos en 0 (eje continuo).
+function armarSerieTendencia(ventana: MesVentana[], movimientos: Movimiento[]): TendenciaMes[] {
+  const porPeriodo = new Map<string, Movimiento[]>();
+  for (const m of movimientos) {
+    const arr = porPeriodo.get(m.periodo);
+    if (arr) arr.push(m);
+    else porPeriodo.set(m.periodo, [m]);
+  }
+  return ventana.map(({ anio, mes, periodo }) =>
+    tendenciaDelMes(anio, mes, porPeriodo.get(periodo) ?? []),
+  );
+}
+
 // GET /api/movimientos/tendencia — serie de los últimos `meses` meses terminando
 // en (anio, mes) inclusive. Los meses sin datos van en 0 (eje continuo).
 export async function tendenciaMovimientos(req: Request, res: Response): Promise<void> {
@@ -708,15 +738,7 @@ export async function tendenciaMovimientos(req: Request, res: Response): Promise
     }
   }
 
-  // Ventana cronológica (más viejo → más nuevo) terminando en (anio, mes) inclusive.
-  const ventana: { anio: number; mes: number; periodo: string }[] = [];
-  const finIdx = q.anio * 12 + (q.mes - 1);
-  for (let i = meses - 1; i >= 0; i--) {
-    const idx = finIdx - i;
-    const anio = Math.floor(idx / 12);
-    const mes = (idx % 12) + 1;
-    ventana.push({ anio, mes, periodo: `${anio}-${String(mes).padStart(2, '0')}-01` });
-  }
+  const ventana = construirVentanaMeses(q.anio, q.mes, meses);
 
   try {
     if (!(await verificarCliente(estudio_id, q.cliente_id, res))) return;
@@ -736,20 +758,7 @@ export async function tendenciaMovimientos(req: Request, res: Response): Promise
     }
 
     const movimientos = ((data ?? []) as unknown) as Movimiento[];
-
-    // Agrupar por periodo (DATE serializado 'YYYY-MM-01').
-    const porPeriodo = new Map<string, Movimiento[]>();
-    for (const m of movimientos) {
-      const arr = porPeriodo.get(m.periodo);
-      if (arr) arr.push(m);
-      else porPeriodo.set(m.periodo, [m]);
-    }
-
-    const serie = ventana.map(({ anio, mes, periodo }) =>
-      tendenciaDelMes(anio, mes, porPeriodo.get(periodo) ?? []),
-    );
-
-    res.json(serie);
+    res.json(armarSerieTendencia(ventana, movimientos));
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -866,15 +875,7 @@ export async function tendenciaMisMovimientos(req: Request, res: Response): Prom
     }
   }
 
-  // Ventana cronológica (más viejo → más nuevo) terminando en (anio, mes) inclusive.
-  const ventana: { anio: number; mes: number; periodo: string }[] = [];
-  const finIdx = q.anio * 12 + (q.mes - 1);
-  for (let i = meses - 1; i >= 0; i--) {
-    const idx = finIdx - i;
-    const anio = Math.floor(idx / 12);
-    const mes = (idx % 12) + 1;
-    ventana.push({ anio, mes, periodo: `${anio}-${String(mes).padStart(2, '0')}-01` });
-  }
+  const ventana = construirVentanaMeses(q.anio, q.mes, meses);
 
   try {
     const { data, error } = await supabase
@@ -891,19 +892,7 @@ export async function tendenciaMisMovimientos(req: Request, res: Response): Prom
     }
 
     const movimientos = ((data ?? []) as unknown) as Movimiento[];
-
-    const porPeriodo = new Map<string, Movimiento[]>();
-    for (const m of movimientos) {
-      const arr = porPeriodo.get(m.periodo);
-      if (arr) arr.push(m);
-      else porPeriodo.set(m.periodo, [m]);
-    }
-
-    const serie = ventana.map(({ anio, mes, periodo }) =>
-      tendenciaDelMes(anio, mes, porPeriodo.get(periodo) ?? []),
-    );
-
-    res.json(serie);
+    res.json(armarSerieTendencia(ventana, movimientos));
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
