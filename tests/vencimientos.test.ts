@@ -11,6 +11,11 @@ const { sb } = await vi.hoisted(async () => {
 });
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
+// authenticate hace lookup de activo en DB (S1); acá se mockea siempre-activo
+// para no interferir con la cola del supabaseMock de cada test.
+vi.mock('../src/middleware/userStatus', () => ({
+  getEstadoActivo: vi.fn(async () => ({ ok: true })),
+}));
 
 import { createApp } from '../src/app';
 
@@ -141,12 +146,26 @@ describe('vencimientos', () => {
     });
   });
 
-  describe('PUT /api/vencimientos', () => {
-    it('400 si entries vacío', async () => {
+  describe('PUT /api/vencimientos (reemplazo declarativo por año)', () => {
+    // Helper: queue del select de filas existentes del año (paso 2 del replace).
+    const existentesCall = (data: unknown[] = []) =>
+      ({ table: 'vencimientos', result: { data, error: null } }) as const;
+
+    it('400 si falta anio en el body', async () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [] });
+        .send({ entries: [validEntry] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/anio debe ser un entero/);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si anio del body fuera de rango', async () => {
+      const res = await request(app)
+        .put('/api/vencimientos')
+        .set('Authorization', authA)
+        .send({ anio: 2023, entries: [] });
       expect(res.status).toBe(400);
       expect(sb.calls).toHaveLength(0);
     });
@@ -155,8 +174,31 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: 'nope' });
+        .send({ anio: 2026, entries: 'nope' });
       expect(res.status).toBe(400);
+    });
+
+    it('entries [] limpia el año completo (borra todo lo existente)', async () => {
+      sb.queue([
+        existentesCall([
+          { id: 'v1', obligacion: 'iva', terminacion_cuit: 3, mes: 6 },
+          { id: 'v2', obligacion: 'monotributo', terminacion_cuit: null, mes: 7 },
+        ]),
+        { table: 'vencimientos', result: { data: null, error: null } }, // delete
+      ]);
+      const res = await request(app)
+        .put('/api/vencimientos')
+        .set('Authorization', authA)
+        .send({ anio: 2026, entries: [] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ count: 0, deleted: 2, data: [] });
+      // sin entries no hay upsert: el primer from es el select de existentes
+      expect(sb.calls[0].op).toBe('select');
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'anio', 2026]);
+      expect(sb.calls[1].op).toBe('delete');
+      expect(sb.calls[1].filters).toContainEqual(['in', 'id', ['v1', 'v2']]);
+      expect(sb.calls[1].filters).toContainEqual(['eq', 'estudio_id', 'estudio-A']);
     });
 
     it('400 si supera el máximo (>500)', async () => {
@@ -164,7 +206,7 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries });
+        .send({ anio: 2026, entries });
       expect(res.status).toBe(400);
       expect(sb.calls).toHaveLength(0);
     });
@@ -173,7 +215,7 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, obligacion: 'ganancias' }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, obligacion: 'ganancias' }] });
       expect(res.status).toBe(400);
       expect(sb.calls).toHaveLength(0);
     });
@@ -182,7 +224,7 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, terminacion_cuit: 10 }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, terminacion_cuit: 10 }] });
       expect(res.status).toBe(400);
     });
 
@@ -190,7 +232,7 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, terminacion_cuit: -1 }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, terminacion_cuit: -1 }] });
       expect(res.status).toBe(400);
     });
 
@@ -198,41 +240,46 @@ describe('vencimientos', () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, mes: 13 }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, mes: 13 }] });
       expect(res.status).toBe(400);
     });
 
-    it('400 si anio = 2023 (bajo rango)', async () => {
+    it('400 si entry.anio fuera de rango', async () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, anio: 2023 }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, anio: 2101 }] });
       expect(res.status).toBe(400);
     });
 
-    it('400 si anio = 2101 (sobre rango)', async () => {
+    it('400 si entry.anio no coincide con anio del body', async () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, anio: 2101 }] });
+        .send({ anio: 2027, entries: [{ ...validEntry, anio: 2026 }] });
       expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/debe coincidir con anio del body/);
+      expect(sb.calls).toHaveLength(0);
     });
 
     it('400 si fecha mal formada', async () => {
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, fecha_vencimiento: '18/06/2026' }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, fecha_vencimiento: '18/06/2026' }] });
       expect(res.status).toBe(400);
     });
 
     it('estudio_id SIEMPRE del JWT (ignora el inyectado en el body)', async () => {
       const out = makeVencimiento({ estudio_id: 'estudio-A' });
-      sb.queue([{ table: 'vencimientos', result: { data: [out], error: null } }]);
+      sb.queue([
+        { table: 'vencimientos', result: { data: [out], error: null } }, // upsert
+        existentesCall(),
+      ]);
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [{ ...validEntry, estudio_id: 'estudio-B' }] });
+        .send({ anio: 2026, entries: [{ ...validEntry, estudio_id: 'estudio-B' }] });
 
       expect(res.status).toBe(200);
       const upsertCall = sb.calls[0];
@@ -243,11 +290,15 @@ describe('vencimientos', () => {
     });
 
     it('dedup interno: dos entries con misma clave → 1 sola fila, se conserva la última', async () => {
-      sb.queue([{ table: 'vencimientos', result: { data: [], error: null } }]);
+      sb.queue([
+        { table: 'vencimientos', result: { data: [], error: null } }, // upsert
+        existentesCall(),
+      ]);
       await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
         .send({
+          anio: 2026,
           entries: [
             { obligacion: 'iva', terminacion_cuit: 3, anio: 2026, mes: 6, fecha_vencimiento: '2026-06-18' },
             { obligacion: 'iva', terminacion_cuit: 3, anio: 2026, mes: 6, fecha_vencimiento: '2026-06-20' },
@@ -261,11 +312,15 @@ describe('vencimientos', () => {
 
     it('terminacion_cuit = null (monotributo) se upsertea OK', async () => {
       const out = makeVencimiento({ obligacion: 'monotributo', terminacion_cuit: null });
-      sb.queue([{ table: 'vencimientos', result: { data: [out], error: null } }]);
+      sb.queue([
+        { table: 'vencimientos', result: { data: [out], error: null } }, // upsert
+        existentesCall(),
+      ]);
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
         .send({
+          anio: 2026,
           entries: [{ obligacion: 'monotributo', terminacion_cuit: null, anio: 2026, mes: 6, fecha_vencimiento: '2026-06-20' }],
         });
 
@@ -273,16 +328,24 @@ describe('vencimientos', () => {
       expect(sb.calls[0].payload[0].terminacion_cuit).toBeNull();
     });
 
-    it('happy: upsert con onConflict sobre las 5 columnas, responde { count, data }', async () => {
+    it('happy: upsert con onConflict + borra filas del año no declaradas, responde { count, deleted, data }', async () => {
       const out = [makeVencimiento({ estudio_id: 'estudio-A', terminacion_cuit: 3 })];
-      sb.queue([{ table: 'vencimientos', result: { data: out, error: null } }]);
+      sb.queue([
+        { table: 'vencimientos', result: { data: out, error: null } }, // upsert
+        existentesCall([
+          // la declarada (queda) + una vieja de otra celda (se borra)
+          { id: 'v-keep', obligacion: 'iva', terminacion_cuit: 3, mes: 6 },
+          { id: 'v-stale', obligacion: 'iva', terminacion_cuit: 7, mes: 6 },
+        ]),
+        { table: 'vencimientos', result: { data: null, error: null } }, // delete
+      ]);
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [validEntry] });
+        .send({ anio: 2026, entries: [validEntry] });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ count: 1, data: out });
+      expect(res.body).toEqual({ count: 1, deleted: 1, data: out });
 
       const upsertCall = sb.calls[0];
       expect(upsertCall.op).toBe('upsert');
@@ -295,14 +358,59 @@ describe('vencimientos', () => {
         mes: 6,
         fecha_vencimiento: '2026-06-18',
       });
+
+      const deleteCall = sb.calls[2];
+      expect(deleteCall.op).toBe('delete');
+      expect(deleteCall.filters).toContainEqual(['in', 'id', ['v-stale']]);
     });
 
-    it('500 si la DB da error', async () => {
+    it('no emite delete si no hay filas stale', async () => {
+      const out = [makeVencimiento({ estudio_id: 'estudio-A', terminacion_cuit: 3 })];
+      sb.queue([
+        { table: 'vencimientos', result: { data: out, error: null } }, // upsert
+        existentesCall([{ id: 'v-keep', obligacion: 'iva', terminacion_cuit: 3, mes: 6 }]),
+      ]);
+      const res = await request(app)
+        .put('/api/vencimientos')
+        .set('Authorization', authA)
+        .send({ anio: 2026, entries: [validEntry] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ count: 1, deleted: 0, data: out });
+      expect(sb.calls).toHaveLength(2); // upsert + select, sin delete
+    });
+
+    it('500 si el upsert da error', async () => {
       sb.queue([{ table: 'vencimientos', result: { data: null, error: { message: 'boom' } } }]);
       const res = await request(app)
         .put('/api/vencimientos')
         .set('Authorization', authA)
-        .send({ entries: [validEntry] });
+        .send({ anio: 2026, entries: [validEntry] });
+      expect(res.status).toBe(500);
+    });
+
+    it('500 si el select de existentes da error', async () => {
+      sb.queue([
+        { table: 'vencimientos', result: { data: [], error: null } }, // upsert
+        { table: 'vencimientos', result: { data: null, error: { message: 'boom' } } },
+      ]);
+      const res = await request(app)
+        .put('/api/vencimientos')
+        .set('Authorization', authA)
+        .send({ anio: 2026, entries: [validEntry] });
+      expect(res.status).toBe(500);
+    });
+
+    it('500 si el delete da error', async () => {
+      sb.queue([
+        { table: 'vencimientos', result: { data: [], error: null } }, // upsert
+        existentesCall([{ id: 'v-stale', obligacion: 'iva', terminacion_cuit: 7, mes: 6 }]),
+        { table: 'vencimientos', result: { data: null, error: { message: 'boom' } } },
+      ]);
+      const res = await request(app)
+        .put('/api/vencimientos')
+        .set('Authorization', authA)
+        .send({ anio: 2026, entries: [validEntry] });
       expect(res.status).toBe(500);
     });
   });

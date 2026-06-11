@@ -17,6 +17,11 @@ const { sb, bcryptMock } = await vi.hoisted(async () => {
 });
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
+// authenticate hace lookup de activo en DB (S1); acá se mockea siempre-activo
+// para no interferir con la cola del supabaseMock de cada test.
+vi.mock('../src/middleware/userStatus', () => ({
+  getEstadoActivo: vi.fn(async () => ({ ok: true })),
+}));
 vi.mock('../src/middleware/rateLimits', () => ({
   loginLimiter: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
