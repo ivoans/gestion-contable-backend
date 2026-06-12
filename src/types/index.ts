@@ -2,7 +2,14 @@ export type Role = 'admin' | 'contador' | 'cliente';
 export type CondicionFiscal = 'monotributista' | 'responsable_inscripto';
 export type EstadoImpuesto = 'borrador' | 'pendiente' | 'vencido' | 'pagado';
 export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido';
-export type Obligacion = 'monotributo' | 'iva' | 'autonomos' | 'ingresos_brutos';
+export type Obligacion =
+  | 'monotributo'
+  | 'iva'
+  | 'autonomos'
+  | 'ingresos_brutos'
+  | 'convenio_multilateral'
+  | 'empleadores_sicoss'
+  | 'casas_particulares';
 
 export interface User {
   id: string;
@@ -13,6 +20,9 @@ export interface User {
   cuit: string | null;
   condicion_fiscal: CondicionFiscal | null;
   categoria: string | null;
+  convenio_multilateral: boolean;
+  empleadores_sicoss: boolean;
+  casas_particulares: boolean;
   telefono: string | null;
   activo: boolean;
   created_at: string;

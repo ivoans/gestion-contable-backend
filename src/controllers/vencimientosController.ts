@@ -5,7 +5,15 @@ import { Vencimiento, Obligacion } from '../types';
 const VENCIMIENTO_FIELDS =
   'id, estudio_id, obligacion, terminacion_cuit, anio, mes, fecha_vencimiento, created_at';
 
-const OBLIGACIONES_VALIDAS: Obligacion[] = ['monotributo', 'iva', 'autonomos', 'ingresos_brutos'];
+const OBLIGACIONES_VALIDAS: Obligacion[] = [
+  'monotributo',
+  'iva',
+  'autonomos',
+  'ingresos_brutos',
+  'convenio_multilateral',
+  'empleadores_sicoss',
+  'casas_particulares',
+];
 
 const ANIO_MIN = 2024;
 const ANIO_MAX = 2100;

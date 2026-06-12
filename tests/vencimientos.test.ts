@@ -220,6 +220,27 @@ describe('vencimientos', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
+    it.each([['convenio_multilateral'], ['empleadores_sicoss'], ['casas_particulares']])(
+      '200 acepta obligacion nueva: %s',
+      async (obligacion) => {
+        const out = makeVencimiento({ obligacion: obligacion as never, terminacion_cuit: null });
+        sb.queue([
+          { table: 'vencimientos', result: { data: [out], error: null } },
+          { table: 'vencimientos', result: { data: [], error: null } },
+        ]);
+        const res = await request(app)
+          .put('/api/vencimientos')
+          .set('Authorization', authA)
+          .send({
+            anio: 2026,
+            entries: [{ ...validEntry, obligacion, terminacion_cuit: null }],
+          });
+        expect(res.status).toBe(200);
+        expect(sb.calls[0].op).toBe('upsert');
+        expect(sb.calls[0].payload).toContainEqual(expect.objectContaining({ obligacion }));
+      },
+    );
+
     it('400 si terminacion_cuit = 10', async () => {
       const res = await request(app)
         .put('/api/vencimientos')

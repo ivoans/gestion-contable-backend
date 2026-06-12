@@ -422,7 +422,12 @@ const OBLIGACIONES_POR_CONDICION: Record<CondicionFiscal, Obligacion[]> = {
 
 // Obligaciones cuyo vencimiento sale por último dígito del CUIT. El resto se
 // busca en el calendario con terminacion_cuit = null ("Todos").
-const OBLIGACIONES_POR_DIGITO: ReadonlySet<Obligacion> = new Set<Obligacion>(['iva', 'autonomos']);
+const OBLIGACIONES_POR_DIGITO: ReadonlySet<Obligacion> = new Set<Obligacion>([
+  'iva',
+  'autonomos',
+  'convenio_multilateral',
+  'empleadores_sicoss',
+]);
 
 // Etiqueta legible que se guarda en la columna `tipo` del impuesto.
 const TIPO_LABEL: Record<Obligacion, string> = {
@@ -430,6 +435,9 @@ const TIPO_LABEL: Record<Obligacion, string> = {
   iva: 'IVA',
   autonomos: 'Autónomos',
   ingresos_brutos: 'Ingresos Brutos',
+  convenio_multilateral: 'Convenio Multilateral',
+  empleadores_sicoss: 'Empleadores SICOSS',
+  casas_particulares: 'Casas Particulares',
 };
 
 type ClienteFiscal = {
@@ -437,7 +445,23 @@ type ClienteFiscal = {
   nombre: string;
   cuit: string | null;
   condicion_fiscal: CondicionFiscal | null;
+  convenio_multilateral: boolean;
+  empleadores_sicoss: boolean;
+  casas_particulares: boolean;
 };
+
+// Obligaciones del cliente = base por condición + opcionales por flags.
+// sicoss/casas se chequean contra la condición por las dudas (la API ya
+// impide marcarlos en monotributistas, esto es solo defensa extra).
+function obligacionesDelCliente(c: ClienteFiscal): Obligacion[] {
+  const base = [...OBLIGACIONES_POR_CONDICION[c.condicion_fiscal!]];
+  if (c.convenio_multilateral) base.push('convenio_multilateral');
+  if (c.condicion_fiscal === 'responsable_inscripto') {
+    if (c.empleadores_sicoss) base.push('empleadores_sicoss');
+    if (c.casas_particulares) base.push('casas_particulares');
+  }
+  return base;
+}
 
 type VencimientoCalendario = {
   obligacion: Obligacion;
@@ -485,7 +509,7 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
     // 1. Clientes activos del estudio con su clasificación fiscal.
     const { data: clientesData, error: clientesError } = await supabase
       .from('users')
-      .select('id, nombre, cuit, condicion_fiscal')
+      .select('id, nombre, cuit, condicion_fiscal, convenio_multilateral, empleadores_sicoss, casas_particulares')
       .eq('role', 'cliente')
       .eq('estudio_id', estudio_id)
       .eq('activo', true);
@@ -530,7 +554,7 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
         continue;
       }
 
-      for (const obligacion of OBLIGACIONES_POR_CONDICION[c.condicion_fiscal]) {
+      for (const obligacion of obligacionesDelCliente(c)) {
         const terminacion = OBLIGACIONES_POR_DIGITO.has(obligacion)
           ? Number(cuitNormalizado[10])
           : null;

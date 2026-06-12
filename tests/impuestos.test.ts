@@ -830,6 +830,135 @@ describe('impuestos', () => {
       expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
     });
 
+    it('genera opcionales del RI: CM y SICOSS por dígito, casas particulares con null', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              {
+                id: 'cli-ri',
+                nombre: 'RI Full',
+                cuit: CUIT_RI, // termina en 6
+                condicion_fiscal: 'responsable_inscripto',
+                convenio_multilateral: true,
+                empleadores_sicoss: true,
+                casas_particulares: true,
+              },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'iva', terminacion_cuit: 6, fecha_vencimiento: '2026-06-18' },
+              { obligacion: 'autonomos', terminacion_cuit: 6, fecha_vencimiento: '2026-06-12' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+              { obligacion: 'convenio_multilateral', terminacion_cuit: 6, fecha_vencimiento: '2026-06-16' },
+              { obligacion: 'empleadores_sicoss', terminacion_cuit: 6, fecha_vencimiento: '2026-06-11' },
+              { obligacion: 'casas_particulares', terminacion_cuit: null, fecha_vencimiento: '2026-06-10' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'impuestos',
+          result: {
+            data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }, { id: 'i6' }],
+            error: null,
+          },
+        },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(6);
+      expect(res.body.obligaciones_sin_fecha).toEqual([]);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      expect(payload).toHaveLength(6);
+
+      const cm = payload.find((p) => p.obligacion === 'convenio_multilateral');
+      expect(cm).toMatchObject({ tipo: 'Convenio Multilateral', fecha_vencimiento: '2026-06-16' });
+
+      const sicoss = payload.find((p) => p.obligacion === 'empleadores_sicoss');
+      expect(sicoss).toMatchObject({ tipo: 'Empleadores SICOSS', fecha_vencimiento: '2026-06-11' });
+
+      const casas = payload.find((p) => p.obligacion === 'casas_particulares');
+      expect(casas).toMatchObject({ tipo: 'Casas Particulares', fecha_vencimiento: '2026-06-10' });
+    });
+
+    it('genera CM para monotributista con el flag; sin flags no genera opcionales', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              {
+                id: 'cli-mono-cm',
+                nombre: 'Mono CM',
+                cuit: CUIT_MONO, // termina en 4
+                condicion_fiscal: 'monotributista',
+                convenio_multilateral: true,
+                empleadores_sicoss: false,
+                casas_particulares: false,
+              },
+              {
+                id: 'cli-mono-plain',
+                nombre: 'Mono Plain',
+                cuit: CUIT_MONO,
+                condicion_fiscal: 'monotributista',
+                convenio_multilateral: false,
+                empleadores_sicoss: false,
+                casas_particulares: false,
+              },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+              { obligacion: 'convenio_multilateral', terminacion_cuit: 4, fecha_vencimiento: '2026-06-15' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'impuestos',
+          result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }], error: null },
+        },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      // Mono CM: monotributo + ing brutos + CM. Mono Plain: solo los dos base.
+      expect(payload).toHaveLength(5);
+
+      const cmRows = payload.filter((p) => p.obligacion === 'convenio_multilateral');
+      expect(cmRows).toHaveLength(1);
+      expect(cmRows[0]).toMatchObject({
+        cliente_id: 'cli-mono-cm',
+        tipo: 'Convenio Multilateral',
+        fecha_vencimiento: '2026-06-15', // fila de terminación 4 (último dígito del CUIT)
+      });
+    });
+
     it('saltea cliente sin condicion_fiscal y con cuit inválido', async () => {
       sb.queue([
         {
