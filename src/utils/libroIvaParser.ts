@@ -134,6 +134,28 @@ function filaEsTotales(fila: unknown[]): boolean {
   return fila.some((c) => /^totales\s+mensuales/i.test(c == null ? '' : String(c).trim()));
 }
 
+/**
+ * true si alguna celda dice "TRANSPORTE" (arrastre/subtotal de página). El software lo
+ * ubica en col0 o en col4 según el reporte, por eso se busca en TODA la fila.
+ */
+function filaEsTransporte(fila: unknown[]): boolean {
+  return fila.some((c) => /^transporte$/i.test(c == null ? '' : String(c).trim()));
+}
+
+/**
+ * Primer valor numérico de la fila entre los índices dados (en orden). Las filas
+ * secundarias del detalle ponen ret/perc bajo la columna de neto y op. exentas bajo la
+ * de acrecentamiento, en posiciones que varían un índice entre compras y ventas; por
+ * eso se barre una pequeña zona en vez de leer un índice fijo.
+ */
+function primerNum(fila: unknown[], idxs: number[]): number | null {
+  for (const i of idxs) {
+    const n = parseNum(fila[i]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
 function esFecha(s: string): boolean {
   return RE_FECHA.test(s);
 }
@@ -244,8 +266,16 @@ export function parsearLibroIVA(filas: unknown[][]): ResultadoLibroIVA {
       break;
     }
 
-    // Arrastre → ignorar.
-    if (/^transporte$/i.test(c0)) continue;
+    // Arrastre de página ("TRANSPORTE", en col0 o col4): es un subtotal ACUMULADO, no
+    // un comprobante. Se saltea junto con su fila secundaria (los acumulados de ret/perc
+    // y op. exentas), y se corta `ultimo` para que esa secundaria no se atribuya al
+    // último detalle. La secundaria solo se consume si existe (no es detalle ni totales).
+    if (filaEsTransporte(fila)) {
+      const sig = filas[i + 1] ?? [];
+      if (!filaVacia(sig) && !esFecha(cell(sig, 0)) && !filaEsTotales(sig)) i++;
+      ultimo = null;
+      continue;
+    }
 
     // Fila de detalle (empieza con fecha).
     if (esFecha(c0)) {
@@ -269,12 +299,13 @@ export function parsearLibroIVA(filas: unknown[][]): ResultadoLibroIVA {
       continue;
     }
 
-    // Fila secundaria: col0 no es fecha y trae valores numéricos posicionales
-    // contra la fila de títulos 2 → pertenece al detalle anterior.
-    const ret = parseNum(fila[0]);
-    const ivaDiscrim = parseNum(fila[1]); // IGNORAR, no se guarda
-    const exentas = parseNum(fila[2]);
-    if (ultimo && (ret !== null || ivaDiscrim !== null || exentas !== null)) {
+    // Fila secundaria del detalle anterior: ret/perc y op. exentas. El export las pone
+    // en la grilla del detalle —ret/perc bajo la columna de neto (idx6/7) y op. exentas
+    // bajo la de acrecentamiento (idx9/10)— y deja IVA discriminado (idx8), que se
+    // ignora. Pertenece al último comprobante leído.
+    const ret = primerNum(fila, [6, 7]);
+    const exentas = primerNum(fila, [9, 10]);
+    if (ultimo && (ret !== null || exentas !== null)) {
       if (ret !== null) ultimo.retenciones_percepciones = ret;
       if (exentas !== null) ultimo.op_exentas = exentas;
     }

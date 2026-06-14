@@ -13,10 +13,10 @@ const COMPRAS: unknown[][] = [
   ['TRANSPORTE', '0.00', '0.00', '0.00', '0.00', '0.00'],
   ['14/03/2026', 'TIQUE F', 'A', '0020-00043417', 'MATEAZZI CLAU', '27-23240873-7', '57053.69', '978.10', '11981.27', '0.00', '70013.06'],
   ['01/04/2026', 'FACTURA', 'A', '0001-04374690', 'SEGUROS RIVAD', '30-50005031-0', '53685.84', '0.00', '11274.03', '0.00', '71942.61'],
-  ['1610.58', '5372.16'],
+  ['', '', '', '', '', '', '1610.58', '', '', '5372.16', ''],
   ['08/04/2026', 'RECIBOS', 'C', '0001-00415065', 'Consejo profe', '30-55795560-3', '23400.00', '0.00', '0.00', '0.00', '23400.00'],
   ['Totales Mensuales:', '134139.53', '978.10', '23255.30', '0.00', '165355.67'],
-  ['1610.58', '5372.16', '0.00'],
+  ['1610.58', '0.00', '5372.16'],
 ];
 
 // Mismo layout pero libro de ventas: encabezado "Ventas", títulos con "Déb. Fisc.".
@@ -30,10 +30,10 @@ const VENTAS: unknown[][] = [
   ['TRANSPORTE', '0.00', '0.00', '0.00', '0.00', '0.00'],
   ['14/03/2026', 'FACTURA', 'A', '0020-00043417', 'MATEAZZI CLAU', '27-23240873-7', '57053.69', '978.10', '11981.27', '0.00', '70013.06'],
   ['01/04/2026', 'FACTURA', 'A', '0001-04374690', 'SEGUROS RIVAD', '30-50005031-0', '53685.84', '0.00', '11274.03', '0.00', '71942.61'],
-  ['1610.58', '5372.16'],
+  ['', '', '', '', '', '', '1610.58', '', '', '5372.16', ''],
   ['08/04/2026', 'RECIBOS', 'C', '0001-00415065', 'Consejo profe', '30-55795560-3', '23400.00', '0.00', '0.00', '0.00', '23400.00'],
   ['Totales Mensuales:', '134139.53', '978.10', '23255.30', '0.00', '165355.67'],
-  ['1610.58', '5372.16', '0.00'],
+  ['1610.58', '0.00', '5372.16'],
 ];
 
 const clonar = (filas: unknown[][]): unknown[][] => filas.map((f) => [...f]);
@@ -71,7 +71,7 @@ describe('parsearLibroIVA', () => {
       const seguros = r.registros[1];
       expect(seguros.contraparte).toBe('SEGUROS RIVAD');
       expect(seguros.retenciones_percepciones).toBe(1610.58);
-      expect(seguros.op_exentas).toBeNull();
+      expect(seguros.op_exentas).toBe(5372.16);
     });
 
     it('captura los totales declarados por el archivo', () => {
@@ -82,7 +82,7 @@ describe('parsearLibroIVA', () => {
         acrecentamiento: 0,
         total: 165355.67,
         retenciones_percepciones: 1610.58,
-        op_exentas: 0,
+        op_exentas: 5372.16,
       });
     });
 
@@ -127,7 +127,7 @@ describe('parsearLibroIVA', () => {
         ['Fecha', 'Cpte.', 'Nº Comp.', 'Proveedor', 'CUIT o Doc.', 'Neto', 'Conc. No Grav.', 'Créd. Fisc.', 'Acrece.', 'Total Operac.'],
         ['Ret./Per./P.Cta.', 'IVA Discrim.', 'Op. Exentas'],
         ['01/04/2026', 'FACTURA', 'A', '0001-1', 'PROV', '30-50005031-0', '1000.00', '0.00', '210.00', '0.00', '1210.00'],
-        ['10.00', '20.00', '200.00'],
+        ['', '', '', '', '', '', '10.00', '', '', '200.00', ''],
       ];
       const r = parsearLibroIVA(filas);
 
