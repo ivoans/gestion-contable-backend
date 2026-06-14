@@ -17,14 +17,24 @@ import {
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-// Archivo único en memoria, límite ~5MB, solo .xlsx (por mimetype o extensión).
+// Algunos software contables exportan el libro como Excel 2003 (.xls), que llega como
+// binario BIFF o como SpreadsheetML/XML. SheetJS lee todos. Se acepta .xlsx y .xls por
+// extensión o por cualquiera de estos mimetypes; lo que pase igual se valida al parsear.
+const MIMES_ACEPTADOS = new Set([
+  XLSX_MIME,
+  'application/vnd.ms-excel',
+  'application/xml',
+  'text/xml',
+]);
+
+// Archivo único en memoria, límite ~5MB, .xlsx o .xls (por mimetype o extensión).
 // Si el archivo no pasa el filtro se descarta (req.file undefined) y el handler
 // responde 400 "archivo requerido".
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const ok = file.mimetype === XLSX_MIME || /\.xlsx$/i.test(file.originalname);
+    const ok = MIMES_ACEPTADOS.has(file.mimetype) || /\.xlsx?$/i.test(file.originalname);
     cb(null, ok);
   },
 });

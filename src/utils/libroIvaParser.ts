@@ -89,6 +89,18 @@ const CAMPOS_TOTALES: (keyof TotalesLibroIVA)[] = [
   'op_exentas',
 ];
 
+// Campos sobre los que la importación BLOQUEA si el total declarado no cuadra con la
+// suma del detalle. retenciones_percepciones y op_exentas se EXCLUYEN: este software
+// los exporta en filas/columnas corridas que no se reconcilian de forma confiable
+// contra el detalle. Igual se capturan y se devuelven, pero su descuadre no frena.
+const CAMPOS_VALIDACION: (keyof TotalesLibroIVA)[] = [
+  'neto',
+  'concepto_no_gravado',
+  'iva',
+  'acrecentamiento',
+  'total',
+];
+
 function cell(fila: unknown[], i: number): string {
   const v = fila[i];
   return v == null ? '' : String(v).trim();
@@ -96,6 +108,30 @@ function cell(fila: unknown[], i: number): string {
 
 function filaVacia(fila: unknown[]): boolean {
   return fila.every((c) => c == null || String(c).trim() === '');
+}
+
+/**
+ * Valores numéricos de una fila, en orden, salteando celdas vacías o no numéricas.
+ * Las filas de totales de este export vienen corridas respecto al detalle (el rótulo
+ * y los montos caen en columnas distintas según el reporte), así que en lugar de leer
+ * por índice fijo se compactan los números y se mapean por posición relativa.
+ */
+function numerosDeFila(fila: unknown[]): number[] {
+  const out: number[] = [];
+  for (const c of fila) {
+    const n = parseNum(c);
+    if (n !== null) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * true si alguna celda de la fila es el rótulo "Totales Mensuales". El software lo
+ * ubica en distintas columnas según el reporte (col0 en el layout impreso, col3 en
+ * el .xls real), por eso se busca en TODA la fila, no solo en la col0.
+ */
+function filaEsTotales(fila: unknown[]): boolean {
+  return fila.some((c) => /^totales\s+mensuales/i.test(c == null ? '' : String(c).trim()));
 }
 
 function esFecha(s: string): boolean {
@@ -189,17 +225,21 @@ export function parsearLibroIVA(filas: unknown[][]): ResultadoLibroIVA {
     const c0 = cell(fila, 0);
 
     // Totales mensuales declarados → capturar y terminar (lo de abajo se ignora).
-    if (/^totales\s+mensuales/i.test(c0)) {
-      const sec = filas[i + 1] ?? [];
+    // El rótulo puede estar en cualquier columna y los montos vienen corridos, así que
+    // se leen compactando las celdas numéricas en orden:
+    //   principal:  [neto, concepto_no_gravado, iva, acrecentamiento, total]
+    //   secundaria: [ret/perc, IVA discrim (ignorar), op exentas]
+    if (filaEsTotales(fila)) {
+      const nums = numerosDeFila(fila);
+      const sec = numerosDeFila(filas[i + 1] ?? []);
       totalesArchivo = {
-        neto: parseNum(fila[1]) ?? 0,
-        concepto_no_gravado: parseNum(fila[2]) ?? 0,
-        iva: parseNum(fila[3]) ?? 0,
-        acrecentamiento: parseNum(fila[4]) ?? 0,
-        total: parseNum(fila[5]) ?? 0,
-        // Fila secundaria: [ret/perc, IVA discrim (ignorar), op exentas].
-        retenciones_percepciones: parseNum(sec[0]) ?? 0,
-        op_exentas: parseNum(sec[2]) ?? 0,
+        neto: nums[0] ?? 0,
+        concepto_no_gravado: nums[1] ?? 0,
+        iva: nums[2] ?? 0,
+        acrecentamiento: nums[3] ?? 0,
+        total: nums[4] ?? 0,
+        retenciones_percepciones: sec[0] ?? 0,
+        op_exentas: sec[2] ?? 0,
       };
       break;
     }
@@ -257,7 +297,7 @@ export function parsearLibroIVA(filas: unknown[][]): ResultadoLibroIVA {
 
   // 6. Validación: declarado vs calculado con tolerancia por redondeo.
   const diferencias: DiferenciaTotales[] = [];
-  for (const campo of CAMPOS_TOTALES) {
+  for (const campo of CAMPOS_VALIDACION) {
     const archivo = totalesArchivo[campo];
     const calculado = sumas[campo];
     const diff = redondear(archivo - calculado);

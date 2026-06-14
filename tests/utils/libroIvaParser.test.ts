@@ -137,6 +137,44 @@ describe('parsearLibroIVA', () => {
     });
   });
 
+  // Layout REAL del .xls (Excel 2003 XML) exportado por el software contable: el
+  // rótulo "Totales Mensuales:" cae en la col3 y los montos vienen corridos respecto
+  // al detalle. ret/perc y op_exentas se declaran en la fila secundaria pero no se
+  // reconcilian contra el detalle, por eso NO deben bloquear la importación.
+  describe('layout corrido del export real (.xls)', () => {
+    const COMPRAS_CORRIDO: unknown[][] = [
+      ['THOMAS SONIA INES', '', '', '', '', '', '', '', '', 'Hoja Nº:', '0'],
+      ['GARIBALDI 639                          CUIT:23-16709214-4'],
+      ['Libro IVA Compras Abril de 2026'],
+      ['Fecha', 'Cpte.', '', 'Nº Comp.', 'Proveedor', 'CUIT o Doc.', 'Neto', 'Conc. No Grav.', 'Créd. Fisc.', 'Acrece.', 'Total Operac.'],
+      ['', '', '', '', '', '', 'Ret./Per./P.Cta.', '', 'IVA Discrim.', '', 'Op. Exentas'],
+      ['', '', '', '', 'TRANSPORTE', '0.00', '', '0.00', '0.00', '0.00', '0.00'],
+      ['14/03/2026', 'TIQUE F', 'A', '0020-00043417', 'MATEAZZI CLAU', '27-23240873-7', '57053.69', '978.10', '11981.27', '0.00', '70013.06'],
+      ['', '', '', 'Totales Mensuales:', '', '57053.69', '978.10', '11981.27', '0.00', '', '70013.06'],
+      ['', '', '', '', '', '', '223679.57', '2649405.13', '', '69149.96', ''],
+    ];
+
+    const r = parsearLibroIVA(COMPRAS_CORRIDO);
+
+    it('detecta totales con el rótulo en col3 y montos corridos', () => {
+      expect(r.totalesArchivo).toMatchObject({
+        neto: 57053.69,
+        concepto_no_gravado: 978.1,
+        iva: 11981.27,
+        acrecentamiento: 0,
+        total: 70013.06,
+        retenciones_percepciones: 223679.57,
+        op_exentas: 69149.96,
+      });
+    });
+
+    it('NO bloquea por ret/perc ni op_exentas; los core-5 cuadran', () => {
+      expect(r.registros).toHaveLength(1);
+      expect(r.validacion.ok).toBe(true);
+      expect(r.validacion.diferencias).toEqual([]);
+    });
+  });
+
   describe('sin encabezado de libro IVA', () => {
     it('lanza Error', () => {
       const filas: unknown[][] = [
