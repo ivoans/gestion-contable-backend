@@ -5,7 +5,7 @@ import { User } from '../types';
 import { isValidEmail } from '../utils/validators';
 
 const USER_FIELDS = 'id, estudio_id, nombre, email, role, cuit, telefono, activo, created_at';
-const ESTUDIO_FIELDS = 'id, nombre, activo, created_at';
+const ESTUDIO_FIELDS = 'id, nombre, activo, comprobantes_habilitados, created_at';
 
 export async function crearContador(req: Request, res: Response): Promise<void> {
   const { nombre, email, password, estudio_id } = req.body as {
@@ -101,6 +101,41 @@ export async function listarEstudios(_req: Request, res: Response): Promise<void
 
     if (error) {
       res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// PATCH /api/admin/estudios/:id/comprobantes — el admin prende/apaga la subida de
+// comprobantes para un estudio. Apagado por defecto: así no se usa Storage hasta
+// decidirlo. Body: { habilitado: boolean }.
+export async function actualizarComprobantesEstudio(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const { habilitado } = req.body as { habilitado?: unknown };
+
+  if (typeof habilitado !== 'boolean') {
+    res.status(400).json({ error: 'habilitado debe ser true o false' });
+    return;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('estudios')
+      .update({ comprobantes_habilitados: habilitado })
+      .eq('id', id)
+      .select(ESTUDIO_FIELDS)
+      .maybeSingle();
+
+    if (error) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+    if (!data) {
+      res.status(404).json({ error: 'Estudio no encontrado' });
       return;
     }
 

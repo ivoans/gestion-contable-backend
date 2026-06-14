@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
 import {
@@ -8,22 +9,47 @@ import {
   obtenerImpuesto,
   actualizarImpuesto,
   cambiarEstadoImpuesto,
+  revertirImpuesto,
   misImpuestos,
   miImpuesto,
+  pagarMiImpuesto,
 } from '../controllers/impuestosController';
+import {
+  subirMiComprobante,
+  miComprobante,
+  comprobanteDeImpuesto,
+} from '../controllers/comprobantesController';
+
+// Comprobante en memoria, límite ~8MB (la imagen se recomprime después con sharp). El
+// mime real se valida en el controller para dar mensajes claros.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+});
 
 const router = Router();
 
 // Cliente routes — registered before /:id to avoid route conflict
 router.get('/mis-impuestos', authenticate, requireRole('cliente'), misImpuestos);
 router.get('/mis-impuestos/:id', authenticate, requireRole('cliente'), miImpuesto);
+router.patch('/mis-impuestos/:id/estado', authenticate, requireRole('cliente'), pagarMiImpuesto);
+router.get('/mis-impuestos/:id/comprobante', authenticate, requireRole('cliente'), miComprobante);
+router.post(
+  '/mis-impuestos/:id/comprobante',
+  authenticate,
+  requireRole('cliente'),
+  upload.single('archivo'),
+  subirMiComprobante,
+);
 
 // Contador routes
 router.post('/generar', authenticate, requireRole('contador'), generarImpuestos);
 router.post('/', authenticate, requireRole('contador'), crearImpuesto);
 router.get('/', authenticate, requireRole('contador'), listarImpuestos);
 router.get('/:id', authenticate, requireRole('contador'), obtenerImpuesto);
+router.get('/:id/comprobante', authenticate, requireRole('contador'), comprobanteDeImpuesto);
 router.patch('/:id', authenticate, requireRole('contador'), actualizarImpuesto);
 router.patch('/:id/estado', authenticate, requireRole('contador'), cambiarEstadoImpuesto);
+router.patch('/:id/revertir', authenticate, requireRole('contador'), revertirImpuesto);
 
 export default router;

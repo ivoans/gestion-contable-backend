@@ -537,6 +537,147 @@ describe('impuestos', () => {
     });
   });
 
+  describe('PATCH /api/impuestos/mis-impuestos/:id/estado (cliente paga)', () => {
+    it('401 sin token', async () => {
+      const res = await request(app).patch('/api/impuestos/mis-impuestos/x/estado').send({});
+      expect(res.status).toBe(401);
+    });
+
+    it('403 si role=contador', async () => {
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(403);
+    });
+
+    it('404 si no existe / no es del cliente', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('404 si es borrador (el cliente no lo ve)', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(404);
+      // Guard antes de la DB: solo la lectura, sin update.
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('400 si ya pagado', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'pagado' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/pagado/);
+    });
+
+    it('200 pendiente → pagado con pagado_por = cliente', async () => {
+      const updated = makeImpuesto({ estado: 'pagado', cliente_id: clienteA.id });
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'pendiente' }, error: null } },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(updated);
+
+      const updateCall = sb.calls[1];
+      expect(updateCall.op).toBe('update');
+      expect(updateCall.payload).toMatchObject({ estado: 'pagado', pagado_por: clienteA.id });
+      expect(typeof updateCall.payload.pagado_at).toBe('string');
+    });
+  });
+
+  describe('PATCH /api/impuestos/:id/revertir (contador revierte)', () => {
+    it('403 si role=cliente', async () => {
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(403);
+    });
+
+    it('404 si no existe / cross-estudio', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('400 si no está pagado', async () => {
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pendiente', fecha_vencimiento: '2030-01-15' }, error: null },
+        },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/revertir/i);
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('200 pagado → vencido si ya venció, limpia pagado_at/por', async () => {
+      const updated = makeImpuesto({ estado: 'vencido' });
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pagado', fecha_vencimiento: '2000-01-01' }, error: null },
+        },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toMatchObject({
+        estado: 'vencido',
+        pagado_at: null,
+        pagado_por: null,
+      });
+    });
+
+    it('200 pagado → pendiente si aún no venció', async () => {
+      const updated = makeImpuesto({ estado: 'pendiente' });
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pagado', fecha_vencimiento: '2100-01-01' }, error: null },
+        },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload.estado).toBe('pendiente');
+    });
+  });
+
   describe('GET /api/impuestos/mis-impuestos', () => {
     it('401 sin token', async () => {
       const res = await request(app).get('/api/impuestos/mis-impuestos');

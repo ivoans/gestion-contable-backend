@@ -8,6 +8,7 @@ import impuestosRouter from './routes/impuestos';
 import movimientosRouter from './routes/movimientos';
 import vencimientosRouter from './routes/vencimientos';
 import internalRouter from './routes/internal';
+import configRouter from './routes/config';
 import { errorHandler } from './middleware/errorHandler';
 
 export function createApp(): Express {
@@ -43,6 +44,7 @@ export function createApp(): Express {
   app.use('/api/movimientos', movimientosRouter);
   app.use('/api/vencimientos', vencimientosRouter);
   app.use('/api/internal', internalRouter);
+  app.use('/api/config', configRouter);
 
   // Error handler al FINAL del pipeline: convierte todo error en JSON
   // (Multer, CORS, JSON malformado, etc.). Ver middleware/errorHandler.ts.

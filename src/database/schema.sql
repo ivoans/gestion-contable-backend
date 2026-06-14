@@ -23,10 +23,11 @@ CREATE TYPE movimiento_origen AS ENUM ('importado', 'manual');
 -- ============================================================
 
 CREATE TABLE estudios (
-  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  nombre      VARCHAR(255) NOT NULL,
-  activo      BOOLEAN NOT NULL DEFAULT true,
-  created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  id                       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre                   VARCHAR(255) NOT NULL,
+  activo                   BOOLEAN NOT NULL DEFAULT true,
+  comprobantes_habilitados BOOLEAN NOT NULL DEFAULT false,
+  created_at               TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================
@@ -88,6 +89,30 @@ CREATE TABLE impuestos (
     (estado != 'pagado' AND pagado_at IS NULL AND pagado_por IS NULL)
   )
 );
+
+-- ============================================================
+-- TABLA: comprobantes_pago
+-- ============================================================
+-- Metadata de los comprobantes que sube el cliente. El archivo vive en Supabase
+-- Storage (bucket privado 'comprobantes'); acá solo el path + datos chicos. Un
+-- comprobante por impuesto (re-subir reemplaza). Ver migración 007.
+
+CREATE TABLE comprobantes_pago (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  impuesto_id   UUID NOT NULL REFERENCES impuestos(id) ON DELETE CASCADE,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  subido_por    UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  storage_path  TEXT NOT NULL,
+  mime          TEXT NOT NULL,
+  size_bytes    INTEGER NOT NULL,
+  original_name TEXT,
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_comprobante_por_impuesto UNIQUE (impuesto_id)
+);
+
+CREATE INDEX idx_comprobantes_impuesto ON comprobantes_pago (impuesto_id);
 
 -- ============================================================
 -- TABLA: vencimientos (calendario que carga la contadora)

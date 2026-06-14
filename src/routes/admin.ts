@@ -8,6 +8,7 @@ import {
   actualizarContador,
   actualizarEstadoContador,
   listarEstudios,
+  actualizarComprobantesEstudio,
 } from '../controllers/adminController';
 
 const router = Router();
@@ -21,5 +22,6 @@ router.patch('/contadores/:id/estado', actualizarEstadoContador);
 router.patch('/contadores/:id', actualizarContador);
 
 router.get('/estudios', listarEstudios);
+router.patch('/estudios/:id/comprobantes', actualizarComprobantesEstudio);
 
 export default router;

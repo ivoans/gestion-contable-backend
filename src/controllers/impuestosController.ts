@@ -408,6 +408,122 @@ export async function miImpuesto(req: Request, res: Response): Promise<void> {
   }
 }
 
+// PATCH /api/impuestos/mis-impuestos/:id/estado — el CLIENTE marca como pagado un
+// impuesto PROPIO. cliente_id sale del token (nunca de la query/body). pagado_por
+// queda en el cliente, así la contadora distingue quién lo marcó. Mismas reglas que
+// el cambio de estado del contador: no se puede repagar ni tocar un borrador (que el
+// cliente ni ve). Si después fue un error, la contadora puede revertirlo.
+export async function pagarMiImpuesto(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const cliente_id = req.user!.id;
+  const estudio_id = req.user!.estudio_id;
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('impuestos')
+      .select('id, estado')
+      .eq('id', id)
+      .eq('cliente_id', cliente_id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const actual = existing as { id: string; estado: EstadoImpuesto } | null;
+    // El cliente no ve borradores: tratarlos como inexistentes para no filtrar nada.
+    if (!actual || actual.estado === 'borrador') {
+      res.status(404).json({ error: 'Impuesto no encontrado' });
+      return;
+    }
+
+    if (actual.estado === 'pagado') {
+      res.status(400).json({ error: 'El impuesto ya está pagado' });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('impuestos')
+      .update({
+        estado: 'pagado',
+        pagado_at: new Date().toISOString(),
+        pagado_por: cliente_id,
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data as Impuesto);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// PATCH /api/impuestos/:id/revertir — la CONTADORA revierte un impuesto pagado (p. ej.
+// el cliente lo marcó por error). Vuelve a 'pendiente' o 'vencido' según el
+// vencimiento y limpia pagado_at/pagado_por (chk_pagado_completo exige ambos null
+// cuando no está pagado). Solo aplica sobre impuestos pagados.
+export async function revertirImpuesto(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const estudio_id = req.user!.estudio_id;
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('impuestos')
+      .select('id, estado, fecha_vencimiento')
+      .eq('id', id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const actual = existing as
+      | { id: string; estado: EstadoImpuesto; fecha_vencimiento: string }
+      | null;
+    if (!actual) {
+      res.status(404).json({ error: 'Impuesto no encontrado' });
+      return;
+    }
+
+    if (actual.estado !== 'pagado') {
+      res.status(400).json({ error: 'Solo se puede revertir un impuesto pagado' });
+      return;
+    }
+
+    // fecha_vencimiento e "hoy" como 'YYYY-MM-DD' (hora local): si ya venció, vuelve a
+    // 'vencido'; si no, a 'pendiente'. Comparación lexicográfica válida en ese formato.
+    const now = new Date();
+    const hoy = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const nuevoEstado: EstadoImpuesto = actual.fecha_vencimiento < hoy ? 'vencido' : 'pendiente';
+
+    const { data, error } = await supabase
+      .from('impuestos')
+      .update({ estado: nuevoEstado, pagado_at: null, pagado_por: null })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data as Impuesto);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
 // ── Generación automática de impuestos en borrador ──────────────────────────
 
 const ANIO_MIN = 2024;
