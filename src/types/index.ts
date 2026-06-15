@@ -52,6 +52,38 @@ export interface Impuesto {
   updated_at: string;
 }
 
+export type EstadoHonorario = 'pendiente' | 'vencido' | 'pagado' | 'anulado';
+
+// Abono fijo recurrente del cliente al estudio (un plan por cliente).
+export interface HonorarioPlan {
+  id: string;
+  estudio_id: string;
+  cliente_id: string;
+  monto: number;
+  dia_vencimiento: number;
+  activo: boolean;
+  vigente_desde: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Instancia mensual del honorario (generada del plan o creada a mano).
+export interface Honorario {
+  id: string;
+  estudio_id: string;
+  cliente_id: string;
+  creado_por: string | null;
+  periodo: string;
+  monto: number;
+  fecha_vencimiento: string;
+  descripcion: string | null;
+  estado: EstadoHonorario;
+  pagado_at: string | null;
+  pagado_por: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Vencimiento {
   id: string;
   estudio_id: string;

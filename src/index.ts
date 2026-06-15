@@ -12,6 +12,7 @@ if (process.env.NODE_ENV !== 'test') {
 
 import { createApp } from './app';
 import { initCronJobs } from './jobs/vencimientosCron';
+import { initHonorariosJobs } from './jobs/honorariosCron';
 
 // M5: UN solo mecanismo de cron. 'internal' = node-cron in-process (default);
 // 'external' = un scheduler externo dispara POST /api/internal/run-cron.
@@ -29,6 +30,7 @@ app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
   if (CRON_SCHEDULER === 'internal') {
     initCronJobs();
+    initHonorariosJobs();
   } else {
     console.log('[cron] Scheduler interno deshabilitado (CRON_SCHEDULER=external) — disparar con POST /api/internal/run-cron');
   }
