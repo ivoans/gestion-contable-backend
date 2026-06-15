@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { JwtPayload } from '../types';
 import { getEstadoActivo } from './userStatus';
+import { TOKEN_COOKIE } from '../lib/cookies';
 
 declare global {
   namespace Express {
@@ -12,14 +13,18 @@ declare global {
 }
 
 export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Token desde la cookie httpOnly (preferido). Fallback al header Authorization: Bearer
+  // para clientes no-browser y para la transición desde el esquema viejo (localStorage).
+  const cookieToken = req.cookies?.[TOKEN_COOKIE] as string | undefined;
   const authHeader = req.headers.authorization;
+  const headerToken =
+    authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+  const token = cookieToken ?? headerToken;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (!token) {
     res.status(401).json({ error: 'Token requerido' });
     return;
   }
-
-  const token = authHeader.split(' ')[1];
 
   let payload: JwtPayload;
   try {

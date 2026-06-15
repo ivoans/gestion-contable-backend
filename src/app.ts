@@ -1,6 +1,8 @@
 import express, { Express } from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 
+import { csrfProtection } from './middleware/csrf';
 import authRouter from './routes/auth';
 import adminRouter from './routes/admin';
 import clientesRouter from './routes/clientes';
@@ -31,7 +33,12 @@ export function createApp(): Express {
     credentials: true,
   }));
 
+  app.use(cookieParser());
   app.use(express.json());
+
+  // CSRF (double-submit): aplica solo a mutaciones autenticadas por cookie. Debe ir
+  // después de cookieParser y antes de las rutas. Ver middleware/csrf.ts.
+  app.use(csrfProtection);
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date() });
