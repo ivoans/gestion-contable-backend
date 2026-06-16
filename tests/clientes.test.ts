@@ -14,6 +14,11 @@ const { sb, bcryptMock } = await vi.hoisted(async () => {
 });
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
+// authenticate hace lookup de activo en DB (S1); acá se mockea siempre-activo
+// para no interferir con la cola del supabaseMock de cada test.
+vi.mock('../src/middleware/userStatus', () => ({
+  getEstadoActivo: vi.fn(async () => ({ ok: true })),
+}));
 vi.mock('bcryptjs', () => ({ default: bcryptMock }));
 
 import { createApp } from '../src/app';
@@ -218,6 +223,115 @@ describe('clientes', () => {
       expect(insertCall.payload).not.toHaveProperty('password');
     });
 
+    it('400 si flag opcional no booleano', async () => {
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'X',
+          email: 'x@y.com',
+          password: '12345678',
+          condicion_fiscal: 'monotributista',
+          cuit: CUIT_VALIDO,
+          convenio_multilateral: 'si',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'convenio_multilateral debe ser boolean' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it.each([['empleadores_sicoss'], ['casas_particulares']])(
+      '400 si monotributista con %s=true',
+      async (flag) => {
+        const res = await request(app)
+          .post('/api/clientes')
+          .set('Authorization', authA)
+          .send({
+            nombre: 'X',
+            email: 'x@y.com',
+            password: '12345678',
+            condicion_fiscal: 'monotributista',
+            cuit: CUIT_VALIDO,
+            [flag]: true,
+          });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({
+          error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
+        });
+        expect(sb.calls).toHaveLength(0);
+      },
+    );
+
+    it('201 persiste flags de impuestos opcionales (RI con los tres)', async () => {
+      const created = makeUser({
+        role: 'cliente',
+        estudio_id: 'estudio-A',
+        condicion_fiscal: 'responsable_inscripto',
+        cuit: CUIT_VALIDO_NORM,
+        convenio_multilateral: true,
+        empleadores_sicoss: true,
+        casas_particulares: true,
+      });
+      sb.queue([
+        { table: 'users', result: { data: null, error: null } },
+        { table: 'users', result: { data: created, error: null } },
+      ]);
+      bcryptMock.hash.mockResolvedValue('hashed');
+
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'RI Full',
+          email: 'ri@y.com',
+          password: '12345678',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'responsable_inscripto',
+          convenio_multilateral: true,
+          empleadores_sicoss: true,
+          casas_particulares: true,
+        });
+      expect(res.status).toBe(201);
+      expect(sb.calls[1].payload).toMatchObject({
+        convenio_multilateral: true,
+        empleadores_sicoss: true,
+        casas_particulares: true,
+      });
+    });
+
+    it('201 monotributista con convenio_multilateral=true (CM aplica a ambas condiciones)', async () => {
+      const created = makeUser({
+        role: 'cliente',
+        estudio_id: 'estudio-A',
+        condicion_fiscal: 'monotributista',
+        cuit: CUIT_VALIDO_NORM,
+        convenio_multilateral: true,
+      });
+      sb.queue([
+        { table: 'users', result: { data: null, error: null } },
+        { table: 'users', result: { data: created, error: null } },
+      ]);
+      bcryptMock.hash.mockResolvedValue('hashed');
+
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'Mono CM',
+          email: 'mono@y.com',
+          password: '12345678',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'monotributista',
+          convenio_multilateral: true,
+        });
+      expect(res.status).toBe(201);
+      expect(sb.calls[1].payload).toMatchObject({
+        convenio_multilateral: true,
+        empleadores_sicoss: false,
+        casas_particulares: false,
+      });
+    });
+
     it('201 con categoria/telefono null si no enviados', async () => {
       const created = makeUser({ role: 'cliente', estudio_id: 'estudio-A' });
       sb.queue([
@@ -388,6 +502,99 @@ describe('clientes', () => {
       expect(res.status).toBe(400);
       expect(res.body).toEqual({ error: 'CUIT inválido' });
       expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si flag opcional no booleano al editar (no llega a DB)', async () => {
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ empleadores_sicoss: 1 });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'empleadores_sicoss debe ser boolean' });
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('400 si queda monotributista con casas_particulares=true en el body', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: {
+              id: cliente.id,
+              condicion_fiscal: 'monotributista',
+              empleadores_sicoss: false,
+              casas_particulares: false,
+            },
+            error: null,
+          },
+        },
+      ]);
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ casas_particulares: true });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
+      });
+      expect(sb.calls).toHaveLength(1); // solo el find, sin update
+    });
+
+    it('200 al pasar a monotributista limpia sicoss/casas guardados (flags no enviados)', async () => {
+      const updated = { ...cliente, condicion_fiscal: 'monotributista' };
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: {
+              id: cliente.id,
+              condicion_fiscal: 'responsable_inscripto',
+              empleadores_sicoss: true,
+              casas_particulares: true,
+            },
+            error: null,
+          },
+        },
+        { table: 'users', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ condicion_fiscal: 'monotributista' });
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toEqual({
+        condicion_fiscal: 'monotributista',
+        empleadores_sicoss: false,
+        casas_particulares: false,
+      });
+    });
+
+    it('200 actualiza flags opcionales en RI', async () => {
+      const updated = { ...cliente, convenio_multilateral: true, empleadores_sicoss: true };
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: {
+              id: cliente.id,
+              condicion_fiscal: 'responsable_inscripto',
+              empleadores_sicoss: false,
+              casas_particulares: false,
+            },
+            error: null,
+          },
+        },
+        { table: 'users', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch(`/api/clientes/${cliente.id}`)
+        .set('Authorization', authA)
+        .send({ convenio_multilateral: true, empleadores_sicoss: true });
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toEqual({
+        convenio_multilateral: true,
+        empleadores_sicoss: true,
+      });
     });
   });
 

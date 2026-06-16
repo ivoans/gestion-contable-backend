@@ -1,12 +1,18 @@
 import express, { Express } from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 
+import { csrfProtection } from './middleware/csrf';
 import authRouter from './routes/auth';
 import adminRouter from './routes/admin';
 import clientesRouter from './routes/clientes';
 import impuestosRouter from './routes/impuestos';
+import honorariosRouter from './routes/honorarios';
+import movimientosRouter from './routes/movimientos';
 import vencimientosRouter from './routes/vencimientos';
 import internalRouter from './routes/internal';
+import configRouter from './routes/config';
+import { errorHandler } from './middleware/errorHandler';
 
 export function createApp(): Express {
   const app = express();
@@ -28,7 +34,12 @@ export function createApp(): Express {
     credentials: true,
   }));
 
+  app.use(cookieParser());
   app.use(express.json());
+
+  // CSRF (double-submit): aplica solo a mutaciones autenticadas por cookie. Debe ir
+  // después de cookieParser y antes de las rutas. Ver middleware/csrf.ts.
+  app.use(csrfProtection);
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date() });
@@ -38,8 +49,15 @@ export function createApp(): Express {
   app.use('/api/admin', adminRouter);
   app.use('/api/clientes', clientesRouter);
   app.use('/api/impuestos', impuestosRouter);
+  app.use('/api/honorarios', honorariosRouter);
+  app.use('/api/movimientos', movimientosRouter);
   app.use('/api/vencimientos', vencimientosRouter);
   app.use('/api/internal', internalRouter);
+  app.use('/api/config', configRouter);
+
+  // Error handler al FINAL del pipeline: convierte todo error en JSON
+  // (Multer, CORS, JSON malformado, etc.). Ver middleware/errorHandler.ts.
+  app.use(errorHandler);
 
   return app;
 }

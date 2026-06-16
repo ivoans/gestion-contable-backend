@@ -14,6 +14,11 @@ const { sb, emailMock } = await vi.hoisted(async () => {
 });
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
+// authenticate hace lookup de activo en DB (S1); acá se mockea siempre-activo
+// para no interferir con la cola del supabaseMock de cada test.
+vi.mock('../src/middleware/userStatus', () => ({
+  getEstadoActivo: vi.fn(async () => ({ ok: true })),
+}));
 vi.mock('../src/services/emailService', () => ({
   sendNuevoImpuesto: emailMock.sendNuevoImpuesto,
 }));
@@ -532,6 +537,147 @@ describe('impuestos', () => {
     });
   });
 
+  describe('PATCH /api/impuestos/mis-impuestos/:id/estado (cliente paga)', () => {
+    it('401 sin token', async () => {
+      const res = await request(app).patch('/api/impuestos/mis-impuestos/x/estado').send({});
+      expect(res.status).toBe(401);
+    });
+
+    it('403 si role=contador', async () => {
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(403);
+    });
+
+    it('404 si no existe / no es del cliente', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('404 si es borrador (el cliente no lo ve)', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(404);
+      // Guard antes de la DB: solo la lectura, sin update.
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('400 si ya pagado', async () => {
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'pagado' }, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/pagado/);
+    });
+
+    it('200 pendiente → pagado con pagado_por = cliente', async () => {
+      const updated = makeImpuesto({ estado: 'pagado', cliente_id: clienteA.id });
+      sb.queue([
+        { table: 'impuestos', result: { data: { id: 'x', estado: 'pendiente' }, error: null } },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(updated);
+
+      const updateCall = sb.calls[1];
+      expect(updateCall.op).toBe('update');
+      expect(updateCall.payload).toMatchObject({ estado: 'pagado', pagado_por: clienteA.id });
+      expect(typeof updateCall.payload.pagado_at).toBe('string');
+    });
+  });
+
+  describe('PATCH /api/impuestos/:id/revertir (contador revierte)', () => {
+    it('403 si role=cliente', async () => {
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', clienteAuth)
+        .send({});
+      expect(res.status).toBe(403);
+    });
+
+    it('404 si no existe / cross-estudio', async () => {
+      sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('400 si no está pagado', async () => {
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pendiente', fecha_vencimiento: '2030-01-15' }, error: null },
+        },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/revertir/i);
+      expect(sb.calls).toHaveLength(1);
+    });
+
+    it('200 pagado → vencido si ya venció, limpia pagado_at/por', async () => {
+      const updated = makeImpuesto({ estado: 'vencido' });
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pagado', fecha_vencimiento: '2000-01-01' }, error: null },
+        },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toMatchObject({
+        estado: 'vencido',
+        pagado_at: null,
+        pagado_por: null,
+      });
+    });
+
+    it('200 pagado → pendiente si aún no venció', async () => {
+      const updated = makeImpuesto({ estado: 'pendiente' });
+      sb.queue([
+        {
+          table: 'impuestos',
+          result: { data: { id: 'x', estado: 'pagado', fecha_vencimiento: '2100-01-01' }, error: null },
+        },
+        { table: 'impuestos', result: { data: updated, error: null } },
+      ]);
+      const res = await request(app)
+        .patch('/api/impuestos/x/revertir')
+        .set('Authorization', authA)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload.estado).toBe('pendiente');
+    });
+  });
+
   describe('GET /api/impuestos/mis-impuestos', () => {
     it('401 sin token', async () => {
       const res = await request(app).get('/api/impuestos/mis-impuestos');
@@ -823,6 +969,135 @@ describe('impuestos', () => {
       expect(ingBrutos).toMatchObject({ tipo: 'Ingresos Brutos', fecha_vencimiento: '2026-06-22' });
 
       expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+    });
+
+    it('genera opcionales del RI: CM y SICOSS por dígito, casas particulares con null', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              {
+                id: 'cli-ri',
+                nombre: 'RI Full',
+                cuit: CUIT_RI, // termina en 6
+                condicion_fiscal: 'responsable_inscripto',
+                convenio_multilateral: true,
+                empleadores_sicoss: true,
+                casas_particulares: true,
+              },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'iva', terminacion_cuit: 6, fecha_vencimiento: '2026-06-18' },
+              { obligacion: 'autonomos', terminacion_cuit: 6, fecha_vencimiento: '2026-06-12' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+              { obligacion: 'convenio_multilateral', terminacion_cuit: 6, fecha_vencimiento: '2026-06-16' },
+              { obligacion: 'empleadores_sicoss', terminacion_cuit: 6, fecha_vencimiento: '2026-06-11' },
+              { obligacion: 'casas_particulares', terminacion_cuit: null, fecha_vencimiento: '2026-06-10' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'impuestos',
+          result: {
+            data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }, { id: 'i6' }],
+            error: null,
+          },
+        },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(6);
+      expect(res.body.obligaciones_sin_fecha).toEqual([]);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      expect(payload).toHaveLength(6);
+
+      const cm = payload.find((p) => p.obligacion === 'convenio_multilateral');
+      expect(cm).toMatchObject({ tipo: 'Convenio Multilateral', fecha_vencimiento: '2026-06-16' });
+
+      const sicoss = payload.find((p) => p.obligacion === 'empleadores_sicoss');
+      expect(sicoss).toMatchObject({ tipo: 'Empleadores SICOSS', fecha_vencimiento: '2026-06-11' });
+
+      const casas = payload.find((p) => p.obligacion === 'casas_particulares');
+      expect(casas).toMatchObject({ tipo: 'Casas Particulares', fecha_vencimiento: '2026-06-10' });
+    });
+
+    it('genera CM para monotributista con el flag; sin flags no genera opcionales', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              {
+                id: 'cli-mono-cm',
+                nombre: 'Mono CM',
+                cuit: CUIT_MONO, // termina en 4
+                condicion_fiscal: 'monotributista',
+                convenio_multilateral: true,
+                empleadores_sicoss: false,
+                casas_particulares: false,
+              },
+              {
+                id: 'cli-mono-plain',
+                nombre: 'Mono Plain',
+                cuit: CUIT_MONO,
+                condicion_fiscal: 'monotributista',
+                convenio_multilateral: false,
+                empleadores_sicoss: false,
+                casas_particulares: false,
+              },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+              { obligacion: 'convenio_multilateral', terminacion_cuit: 4, fecha_vencimiento: '2026-06-15' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'impuestos',
+          result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }], error: null },
+        },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      // Mono CM: monotributo + ing brutos + CM. Mono Plain: solo los dos base.
+      expect(payload).toHaveLength(5);
+
+      const cmRows = payload.filter((p) => p.obligacion === 'convenio_multilateral');
+      expect(cmRows).toHaveLength(1);
+      expect(cmRows[0]).toMatchObject({
+        cliente_id: 'cli-mono-cm',
+        tipo: 'Convenio Multilateral',
+        fecha_vencimiento: '2026-06-15', // fila de terminación 4 (último dígito del CUIT)
+      });
     });
 
     it('saltea cliente sin condicion_fiscal y con cuit inválido', async () => {

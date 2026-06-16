@@ -5,7 +5,15 @@ import { Vencimiento, Obligacion } from '../types';
 const VENCIMIENTO_FIELDS =
   'id, estudio_id, obligacion, terminacion_cuit, anio, mes, fecha_vencimiento, created_at';
 
-const OBLIGACIONES_VALIDAS: Obligacion[] = ['monotributo', 'iva', 'autonomos', 'ingresos_brutos'];
+const OBLIGACIONES_VALIDAS: Obligacion[] = [
+  'monotributo',
+  'iva',
+  'autonomos',
+  'ingresos_brutos',
+  'convenio_multilateral',
+  'empleadores_sicoss',
+  'casas_particulares',
+];
 
 const ANIO_MIN = 2024;
 const ANIO_MAX = 2100;
@@ -74,13 +82,22 @@ export async function listarVencimientos(req: Request, res: Response): Promise<v
   }
 }
 
-// PUT /api/vencimientos — upsert masivo idempotente
-export async function upsertVencimientos(req: Request, res: Response): Promise<void> {
+// PUT /api/vencimientos — reemplazo declarativo del calendario de UN año:
+// upsertea las entries recibidas y BORRA las filas del año que no estén en la
+// lista (B1: vaciar una celda en la UI debe borrar la fila en DB). entries
+// puede ser [] para limpiar el año completo.
+export async function reemplazarVencimientosAnio(req: Request, res: Response): Promise<void> {
   const estudio_id = req.user!.estudio_id!; // contador siempre tiene estudio (chk_estudio_por_role)
-  const { entries } = req.body as { entries?: unknown };
+  const { anio: anioBody, entries } = req.body as { anio?: unknown; entries?: unknown };
 
-  if (!Array.isArray(entries) || entries.length === 0) {
-    res.status(400).json({ error: 'entries debe ser un array no vacío' });
+  if (!Number.isInteger(anioBody) || (anioBody as number) < ANIO_MIN || (anioBody as number) > ANIO_MAX) {
+    res.status(400).json({ error: `anio debe ser un entero entre ${ANIO_MIN} y ${ANIO_MAX}` });
+    return;
+  }
+  const anio = anioBody as number;
+
+  if (!Array.isArray(entries)) {
+    res.status(400).json({ error: 'entries debe ser un array' });
     return;
   }
 
@@ -115,6 +132,11 @@ export async function upsertVencimientos(req: Request, res: Response): Promise<v
       return;
     }
 
+    if ((e.anio as number) !== anio) {
+      res.status(400).json({ error: `${prefix}.anio debe coincidir con anio del body (${anio})` });
+      return;
+    }
+
     if (!Number.isInteger(e.mes) || (e.mes as number) < 1 || (e.mes as number) > 12) {
       res.status(400).json({ error: `${prefix}.mes debe ser un entero entre 1 y 12` });
       return;
@@ -138,26 +160,63 @@ export async function upsertVencimientos(req: Request, res: Response): Promise<v
 
   // Dedup por la clave de conflicto: Postgres no permite que un ON CONFLICT
   // afecte la misma fila dos veces en un solo comando. Conservamos la última.
+  // Como todas las entries son del mismo año, la clave omite anio.
   const deduped = new Map<string, EntryRow>();
   for (const r of rows) {
-    const key = `${r.obligacion}|${r.terminacion_cuit ?? 'null'}|${r.anio}|${r.mes}`;
+    const key = `${r.obligacion}|${r.terminacion_cuit ?? 'null'}|${r.mes}`;
     deduped.set(key, r);
   }
 
   try {
-    const { data, error } = await supabase
-      .from('vencimientos')
-      .upsert([...deduped.values()], {
-        onConflict: 'estudio_id, obligacion, terminacion_cuit, anio, mes',
-      })
-      .select(VENCIMIENTO_FIELDS);
+    // 1) Upsert de lo declarado (si hay algo que declarar).
+    let upserted: Vencimiento[] = [];
+    if (deduped.size > 0) {
+      const { data, error } = await supabase
+        .from('vencimientos')
+        .upsert([...deduped.values()], {
+          onConflict: 'estudio_id, obligacion, terminacion_cuit, anio, mes',
+        })
+        .select(VENCIMIENTO_FIELDS);
 
-    if (error || !data) {
+      if (error || !data) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+        return;
+      }
+      upserted = data as Vencimiento[];
+    }
+
+    // 2) Borrar las filas del año que NO están declaradas (celdas vaciadas).
+    //    Se hace después del upsert: si algo falla a mitad de camino, lo
+    //    declarado ya quedó persistido y solo sobran filas viejas.
+    const { data: existentes, error: selectError } = await supabase
+      .from('vencimientos')
+      .select('id, obligacion, terminacion_cuit, mes')
+      .eq('estudio_id', estudio_id)
+      .eq('anio', anio);
+
+    if (selectError || !existentes) {
       res.status(500).json({ error: 'Error interno del servidor' });
       return;
     }
 
-    res.json({ count: data.length, data: data as Vencimiento[] });
+    const staleIds = (existentes as Pick<Vencimiento, 'id' | 'obligacion' | 'terminacion_cuit' | 'mes'>[])
+      .filter((v) => !deduped.has(`${v.obligacion}|${v.terminacion_cuit ?? 'null'}|${v.mes}`))
+      .map((v) => v.id);
+
+    if (staleIds.length > 0) {
+      const { error: deleteError } = await supabase
+        .from('vencimientos')
+        .delete()
+        .eq('estudio_id', estudio_id)
+        .in('id', staleIds);
+
+      if (deleteError) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+        return;
+      }
+    }
+
+    res.json({ count: upserted.length, deleted: staleIds.length, data: upserted });
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }

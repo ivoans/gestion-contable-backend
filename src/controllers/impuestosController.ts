@@ -408,6 +408,122 @@ export async function miImpuesto(req: Request, res: Response): Promise<void> {
   }
 }
 
+// PATCH /api/impuestos/mis-impuestos/:id/estado — el CLIENTE marca como pagado un
+// impuesto PROPIO. cliente_id sale del token (nunca de la query/body). pagado_por
+// queda en el cliente, así la contadora distingue quién lo marcó. Mismas reglas que
+// el cambio de estado del contador: no se puede repagar ni tocar un borrador (que el
+// cliente ni ve). Si después fue un error, la contadora puede revertirlo.
+export async function pagarMiImpuesto(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const cliente_id = req.user!.id;
+  const estudio_id = req.user!.estudio_id;
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('impuestos')
+      .select('id, estado')
+      .eq('id', id)
+      .eq('cliente_id', cliente_id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const actual = existing as { id: string; estado: EstadoImpuesto } | null;
+    // El cliente no ve borradores: tratarlos como inexistentes para no filtrar nada.
+    if (!actual || actual.estado === 'borrador') {
+      res.status(404).json({ error: 'Impuesto no encontrado' });
+      return;
+    }
+
+    if (actual.estado === 'pagado') {
+      res.status(400).json({ error: 'El impuesto ya está pagado' });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('impuestos')
+      .update({
+        estado: 'pagado',
+        pagado_at: new Date().toISOString(),
+        pagado_por: cliente_id,
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data as Impuesto);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// PATCH /api/impuestos/:id/revertir — la CONTADORA revierte un impuesto pagado (p. ej.
+// el cliente lo marcó por error). Vuelve a 'pendiente' o 'vencido' según el
+// vencimiento y limpia pagado_at/pagado_por (chk_pagado_completo exige ambos null
+// cuando no está pagado). Solo aplica sobre impuestos pagados.
+export async function revertirImpuesto(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  const estudio_id = req.user!.estudio_id;
+
+  try {
+    const { data: existing, error: findError } = await supabase
+      .from('impuestos')
+      .select('id, estado, fecha_vencimiento')
+      .eq('id', id)
+      .eq('estudio_id', estudio_id)
+      .maybeSingle();
+
+    if (findError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const actual = existing as
+      | { id: string; estado: EstadoImpuesto; fecha_vencimiento: string }
+      | null;
+    if (!actual) {
+      res.status(404).json({ error: 'Impuesto no encontrado' });
+      return;
+    }
+
+    if (actual.estado !== 'pagado') {
+      res.status(400).json({ error: 'Solo se puede revertir un impuesto pagado' });
+      return;
+    }
+
+    // fecha_vencimiento e "hoy" como 'YYYY-MM-DD' (hora local): si ya venció, vuelve a
+    // 'vencido'; si no, a 'pendiente'. Comparación lexicográfica válida en ese formato.
+    const now = new Date();
+    const hoy = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const nuevoEstado: EstadoImpuesto = actual.fecha_vencimiento < hoy ? 'vencido' : 'pendiente';
+
+    const { data, error } = await supabase
+      .from('impuestos')
+      .update({ estado: nuevoEstado, pagado_at: null, pagado_por: null })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    res.json(data as Impuesto);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
 // ── Generación automática de impuestos en borrador ──────────────────────────
 
 const ANIO_MIN = 2024;
@@ -422,7 +538,12 @@ const OBLIGACIONES_POR_CONDICION: Record<CondicionFiscal, Obligacion[]> = {
 
 // Obligaciones cuyo vencimiento sale por último dígito del CUIT. El resto se
 // busca en el calendario con terminacion_cuit = null ("Todos").
-const OBLIGACIONES_POR_DIGITO: ReadonlySet<Obligacion> = new Set<Obligacion>(['iva', 'autonomos']);
+const OBLIGACIONES_POR_DIGITO: ReadonlySet<Obligacion> = new Set<Obligacion>([
+  'iva',
+  'autonomos',
+  'convenio_multilateral',
+  'empleadores_sicoss',
+]);
 
 // Etiqueta legible que se guarda en la columna `tipo` del impuesto.
 const TIPO_LABEL: Record<Obligacion, string> = {
@@ -430,6 +551,9 @@ const TIPO_LABEL: Record<Obligacion, string> = {
   iva: 'IVA',
   autonomos: 'Autónomos',
   ingresos_brutos: 'Ingresos Brutos',
+  convenio_multilateral: 'Convenio Multilateral',
+  empleadores_sicoss: 'Empleadores SICOSS',
+  casas_particulares: 'Casas Particulares',
 };
 
 type ClienteFiscal = {
@@ -437,7 +561,23 @@ type ClienteFiscal = {
   nombre: string;
   cuit: string | null;
   condicion_fiscal: CondicionFiscal | null;
+  convenio_multilateral: boolean;
+  empleadores_sicoss: boolean;
+  casas_particulares: boolean;
 };
+
+// Obligaciones del cliente = base por condición + opcionales por flags.
+// sicoss/casas se chequean contra la condición por las dudas (la API ya
+// impide marcarlos en monotributistas, esto es solo defensa extra).
+function obligacionesDelCliente(c: ClienteFiscal): Obligacion[] {
+  const base = [...OBLIGACIONES_POR_CONDICION[c.condicion_fiscal!]];
+  if (c.convenio_multilateral) base.push('convenio_multilateral');
+  if (c.condicion_fiscal === 'responsable_inscripto') {
+    if (c.empleadores_sicoss) base.push('empleadores_sicoss');
+    if (c.casas_particulares) base.push('casas_particulares');
+  }
+  return base;
+}
 
 type VencimientoCalendario = {
   obligacion: Obligacion;
@@ -485,7 +625,7 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
     // 1. Clientes activos del estudio con su clasificación fiscal.
     const { data: clientesData, error: clientesError } = await supabase
       .from('users')
-      .select('id, nombre, cuit, condicion_fiscal')
+      .select('id, nombre, cuit, condicion_fiscal, convenio_multilateral, empleadores_sicoss, casas_particulares')
       .eq('role', 'cliente')
       .eq('estudio_id', estudio_id)
       .eq('activo', true);
@@ -530,7 +670,7 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
         continue;
       }
 
-      for (const obligacion of OBLIGACIONES_POR_CONDICION[c.condicion_fiscal]) {
+      for (const obligacion of obligacionesDelCliente(c)) {
         const terminacion = OBLIGACIONES_POR_DIGITO.has(obligacion)
           ? Number(cuitNormalizado[10])
           : null;

@@ -1,7 +1,7 @@
 // tests/middleware/auth.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Request, Response, NextFunction } from 'express';
-import { authenticate } from '../../src/middleware/auth';
+import type { EstadoActivo } from '../../src/middleware/userStatus';
 import { makeUser } from '../helpers/factories';
 import {
   bearerFor,
@@ -9,6 +9,15 @@ import {
   badSignatureBearerFor,
   MALFORMED_HEADER,
 } from '../helpers/auth';
+
+// authenticate consulta `activo` (usuario + estudio) en DB; acá se mockea el
+// lookup para controlar cada escenario de revocación sin tocar supabase.
+const getEstadoActivoMock = vi.fn<(userId: string) => Promise<EstadoActivo>>();
+vi.mock('../../src/middleware/userStatus', () => ({
+  getEstadoActivo: (userId: string) => getEstadoActivoMock(userId),
+}));
+
+import { authenticate } from '../../src/middleware/auth';
 
 function makeReqRes(authHeader?: string) {
   const req = { headers: authHeader ? { authorization: authHeader } : {} } as Request;
@@ -23,53 +32,61 @@ function makeReqRes(authHeader?: string) {
 describe('middleware/authenticate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getEstadoActivoMock.mockResolvedValue({ ok: true });
   });
 
-  it('401 sin Authorization header', () => {
+  it('401 sin Authorization header', async () => {
     const { req, res, next } = makeReqRes();
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: 'Token requerido' });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('401 si header no empieza con "Bearer "', () => {
+  it('401 si header no empieza con "Bearer "', async () => {
     const { req, res, next } = makeReqRes(MALFORMED_HEADER);
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: 'Token requerido' });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('401 con token expirado', () => {
+  it('401 con token expirado', async () => {
     const user = makeUser({ role: 'contador' });
     const { req, res, next } = makeReqRes(expiredBearerFor(user));
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: 'Token inválido o expirado' });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('401 con firma inválida (secret incorrecto)', () => {
+  it('401 con firma inválida (secret incorrecto)', async () => {
     const user = makeUser();
     const { req, res, next } = makeReqRes(badSignatureBearerFor(user));
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: 'Token inválido o expirado' });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('401 con token sintácticamente roto', () => {
+  it('401 con token sintácticamente roto', async () => {
     const { req, res, next } = makeReqRes('Bearer not-a-jwt');
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
   });
 
-  it('next() y req.user con token válido', () => {
+  it('no consulta la DB si el token es inválido', async () => {
+    const { req, res, next } = makeReqRes('Bearer not-a-jwt');
+    await authenticate(req, res, next);
+    expect(getEstadoActivoMock).not.toHaveBeenCalled();
+  });
+
+  it('next() y req.user con token válido y usuario activo', async () => {
     const user = makeUser({ role: 'contador', estudio_id: 'estudio-1' });
     const { req, res, next } = makeReqRes(bearerFor(user));
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
+    expect(getEstadoActivoMock).toHaveBeenCalledWith(user.id);
     expect(next).toHaveBeenCalledOnce();
     expect(res.status).not.toHaveBeenCalled();
     expect(req.user).toMatchObject({
@@ -80,12 +97,43 @@ describe('middleware/authenticate', () => {
     });
   });
 
-  it('preserva role admin con estudio_id null', () => {
+  it('preserva role admin con estudio_id null', async () => {
     const admin = makeUser({ role: 'admin' });
     const { req, res, next } = makeReqRes(bearerFor(admin));
-    authenticate(req, res, next);
+    await authenticate(req, res, next);
     expect(next).toHaveBeenCalledOnce();
     expect(req.user?.role).toBe('admin');
     expect(req.user?.estudio_id).toBeNull();
+  });
+
+  it('401 si el usuario fue desactivado (token vivo revocado)', async () => {
+    getEstadoActivoMock.mockResolvedValue({ ok: false, reason: 'usuario_inactivo' });
+    const user = makeUser({ role: 'cliente', estudio_id: 'estudio-1' });
+    const { req, res, next } = makeReqRes(bearerFor(user));
+    await authenticate(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Cuenta desactivada' });
+    expect(next).not.toHaveBeenCalled();
+    expect(req.user).toBeUndefined();
+  });
+
+  it('401 si el estudio del usuario fue desactivado', async () => {
+    getEstadoActivoMock.mockResolvedValue({ ok: false, reason: 'estudio_inactivo' });
+    const user = makeUser({ role: 'contador', estudio_id: 'estudio-1' });
+    const { req, res, next } = makeReqRes(bearerFor(user));
+    await authenticate(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Estudio desactivado' });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('500 si falla el lookup en DB (fail-closed)', async () => {
+    getEstadoActivoMock.mockResolvedValue({ ok: false, reason: 'error_db' });
+    const user = makeUser({ role: 'contador', estudio_id: 'estudio-1' });
+    const { req, res, next } = makeReqRes(bearerFor(user));
+    await authenticate(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Error interno del servidor' });
+    expect(next).not.toHaveBeenCalled();
   });
 });

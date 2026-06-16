@@ -12,19 +12,23 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TYPE role AS ENUM ('admin', 'contador', 'cliente');
 CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado', 'borrador');
+CREATE TYPE estado_honorario AS ENUM ('pendiente', 'vencido', 'pagado', 'anulado');
 CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido');
 CREATE TYPE condicion_fiscal AS ENUM ('monotributista', 'responsable_inscripto');
 CREATE TYPE obligacion AS ENUM ('monotributo', 'iva', 'autonomos', 'ingresos_brutos');
+CREATE TYPE movimiento_tipo AS ENUM ('compra', 'venta');
+CREATE TYPE movimiento_origen AS ENUM ('importado', 'manual');
 
 -- ============================================================
 -- TABLA: estudios
 -- ============================================================
 
 CREATE TABLE estudios (
-  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  nombre      VARCHAR(255) NOT NULL,
-  activo      BOOLEAN NOT NULL DEFAULT true,
-  created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  id                       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  nombre                   VARCHAR(255) NOT NULL,
+  activo                   BOOLEAN NOT NULL DEFAULT true,
+  comprobantes_habilitados BOOLEAN NOT NULL DEFAULT false,
+  created_at               TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================
@@ -88,6 +92,96 @@ CREATE TABLE impuestos (
 );
 
 -- ============================================================
+-- TABLA: honorarios_plan (abono recurrente del cliente al estudio)
+-- ============================================================
+-- El abono fijo configurado por cliente (un plan por cliente). La contadora edita
+-- `monto`; afecta los meses que se generen de ahí en más. Ver migración 008.
+
+CREATE TABLE honorarios_plan (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id      UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  monto           DECIMAL(12, 2) NOT NULL CHECK (monto > 0),
+  dia_vencimiento SMALLINT NOT NULL DEFAULT 10 CHECK (dia_vencimiento BETWEEN 1 AND 28),
+  activo          BOOLEAN NOT NULL DEFAULT true,
+  vigente_desde   DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_honorarios_plan_cliente UNIQUE (cliente_id)
+);
+
+CREATE INDEX idx_honorarios_plan_estudio ON honorarios_plan (estudio_id);
+
+-- ============================================================
+-- TABLA: honorarios (instancia mensual generada del plan)
+-- ============================================================
+
+CREATE TABLE honorarios (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id        UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  creado_por        UUID REFERENCES users(id) ON DELETE RESTRICT,  -- NULL = generado por cron
+  periodo           DATE NOT NULL,            -- primer día del mes
+  monto             DECIMAL(12, 2) NOT NULL CHECK (monto > 0),
+  fecha_vencimiento DATE NOT NULL,
+  descripcion       TEXT,
+  estado            estado_honorario NOT NULL DEFAULT 'pendiente',
+  pagado_at         TIMESTAMP WITH TIME ZONE,
+  pagado_por        UUID REFERENCES users(id) ON DELETE RESTRICT,
+  created_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_honorarios_cliente_periodo UNIQUE (cliente_id, periodo),
+
+  CONSTRAINT chk_honorario_pagado_completo CHECK (
+    (estado = 'pagado' AND pagado_at IS NOT NULL AND pagado_por IS NOT NULL) OR
+    (estado <> 'pagado' AND pagado_at IS NULL AND pagado_por IS NULL)
+  )
+);
+
+CREATE INDEX idx_honorarios_cliente ON honorarios (cliente_id);
+CREATE INDEX idx_honorarios_estudio ON honorarios (estudio_id);
+CREATE INDEX idx_honorarios_estado ON honorarios (estado);
+CREATE INDEX idx_honorarios_cron ON honorarios (estado, fecha_vencimiento)
+  WHERE estado = 'pendiente';
+
+-- ============================================================
+-- TABLA: comprobantes_pago
+-- ============================================================
+-- Metadata de los comprobantes que sube el cliente. El archivo vive en Supabase
+-- Storage (bucket privado 'comprobantes'); acá solo el path + datos chicos. Cuelga de
+-- un impuesto O de un honorario (exactamente uno). Un comprobante por target
+-- (re-subir reemplaza). Ver migraciones 007 y 008.
+
+CREATE TABLE comprobantes_pago (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  impuesto_id   UUID REFERENCES impuestos(id) ON DELETE CASCADE,
+  honorario_id  UUID REFERENCES honorarios(id) ON DELETE CASCADE,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  subido_por    UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  storage_path  TEXT NOT NULL,
+  mime          TEXT NOT NULL,
+  size_bytes    INTEGER NOT NULL,
+  original_name TEXT,
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  -- Exactamente uno de los dos targets.
+  CONSTRAINT chk_comprobante_target CHECK (
+    (impuesto_id IS NOT NULL AND honorario_id IS NULL) OR
+    (impuesto_id IS NULL AND honorario_id IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX uq_comprobante_por_impuesto
+  ON comprobantes_pago (impuesto_id) WHERE impuesto_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_comprobante_por_honorario
+  ON comprobantes_pago (honorario_id) WHERE honorario_id IS NOT NULL;
+CREATE INDEX idx_comprobantes_impuesto ON comprobantes_pago (impuesto_id);
+CREATE INDEX idx_comprobantes_honorario ON comprobantes_pago (honorario_id);
+
+-- ============================================================
 -- TABLA: vencimientos (calendario que carga la contadora)
 -- ============================================================
 
@@ -120,6 +214,34 @@ CREATE TABLE notificaciones (
 );
 
 -- ============================================================
+-- TABLA: movimientos (libro IVA compras/ventas)
+-- ============================================================
+
+CREATE TABLE movimientos (
+  id                        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id                UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id                UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  tipo                      movimiento_tipo NOT NULL,
+  periodo                   DATE NOT NULL,            -- primer día del mes del libro
+  fecha                     DATE NOT NULL,            -- fecha del comprobante (puede ser de otro mes)
+  tipo_comprobante          TEXT,
+  letra                     TEXT,
+  numero                    TEXT,
+  contraparte               TEXT,
+  cuit_contraparte          TEXT,
+  neto                      NUMERIC(15, 2),
+  concepto_no_gravado       NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  iva                       NUMERIC(15, 2),
+  acrecentamiento           NUMERIC(15, 2) NOT NULL DEFAULT 0,
+  total                     NUMERIC(15, 2) NOT NULL,
+  retenciones_percepciones  NUMERIC(15, 2),
+  op_exentas                NUMERIC(15, 2),
+  origen                    movimiento_origen NOT NULL,
+  creado_por                UUID REFERENCES users(id) ON DELETE RESTRICT,
+  created_at                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+-- ============================================================
 -- ÍNDICES
 -- ============================================================
 
@@ -147,6 +269,11 @@ CREATE UNIQUE INDEX uq_impuestos_obligacion_periodo
 -- vencimientos
 CREATE INDEX idx_vencimientos_estudio_id ON vencimientos(estudio_id);
 
+-- movimientos
+-- Libro de un cliente por mes; también soporta el reemplazo de importados en la re-subida.
+CREATE INDEX idx_movimientos_libro
+  ON movimientos (estudio_id, cliente_id, tipo, periodo);
+
 -- notificaciones
 CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
 -- Índice compuesto para el anti-duplicado del cron
@@ -168,3 +295,79 @@ CREATE TRIGGER trg_impuestos_updated_at
   BEFORE UPDATE ON impuestos
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_honorarios_updated_at
+  BEFORE UPDATE ON honorarios
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_honorarios_plan_updated_at
+  BEFORE UPDATE ON honorarios_plan
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================
+-- FUNCIÓN: reemplazar_movimientos_importados (libro IVA)
+-- ============================================================
+-- Reemplazo ATÓMICO del libro IVA importado de un cliente para un período:
+-- borra los movimientos importados existentes (mismo estudio/cliente/tipo/período)
+-- e inserta los nuevos, todo en la misma transacción. Si el INSERT falla, el
+-- DELETE se revierte: nunca queda el libro a medio reemplazar.
+-- Las columnas de contexto (estudio_id, cliente_id, tipo, periodo, creado_por,
+-- origen='importado') las setea la función desde sus parámetros, NO vienen en el jsonb.
+
+CREATE OR REPLACE FUNCTION reemplazar_movimientos_importados(
+  p_estudio_id uuid,
+  p_cliente_id uuid,
+  p_tipo       movimiento_tipo,
+  p_periodo    date,
+  p_creado_por uuid,
+  p_registros  jsonb
+) RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_borrados   integer;
+  v_insertados integer;
+BEGIN
+  -- 1. Borrar los importados previos de ese libro/período.
+  DELETE FROM movimientos
+  WHERE estudio_id = p_estudio_id
+    AND cliente_id = p_cliente_id
+    AND tipo       = p_tipo
+    AND periodo    = p_periodo
+    AND origen     = 'importado';
+  GET DIAGNOSTICS v_borrados = ROW_COUNT;
+
+  -- 2. Insertar los nuevos desde el jsonb, fijando el contexto desde los params.
+  INSERT INTO movimientos (
+    estudio_id, cliente_id, tipo, periodo, fecha, tipo_comprobante, letra,
+    numero, contraparte, cuit_contraparte, neto, concepto_no_gravado, iva,
+    acrecentamiento, total, retenciones_percepciones, op_exentas, origen, creado_por
+  )
+  SELECT
+    p_estudio_id, p_cliente_id, p_tipo, p_periodo, r.fecha, r.tipo_comprobante,
+    r.letra, r.numero, r.contraparte, r.cuit_contraparte, r.neto,
+    COALESCE(r.concepto_no_gravado, 0), r.iva, COALESCE(r.acrecentamiento, 0),
+    r.total, r.retenciones_percepciones, r.op_exentas, 'importado', p_creado_por
+  FROM jsonb_to_recordset(p_registros) AS r(
+    fecha                    date,
+    tipo_comprobante         text,
+    letra                    text,
+    numero                   text,
+    contraparte              text,
+    cuit_contraparte         text,
+    neto                     numeric,
+    concepto_no_gravado      numeric,
+    iva                      numeric,
+    acrecentamiento          numeric,
+    total                    numeric,
+    retenciones_percepciones numeric,
+    op_exentas               numeric
+  );
+  GET DIAGNOSTICS v_insertados = ROW_COUNT;
+
+  -- 3. Devolver el resumen.
+  RETURN jsonb_build_object('borrados', v_borrados, 'insertados', v_insertados);
+END;
+$$;
