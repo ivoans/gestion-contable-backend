@@ -103,6 +103,28 @@ describe('parsearLibroIVA', () => {
     });
   });
 
+  // Otros estudios exportan el título como "LIBRO DE IVA COMPRAS/VENTAS ..." (con
+  // "DE" intercalado y espaciado variable) en vez de "Libro IVA ...". Mismo layout.
+  describe('encabezado variante "LIBRO DE IVA"', () => {
+    it('reconoce "LIBRO DE IVA COMPRAS"', () => {
+      const filas = clonar(COMPRAS);
+      filas[3] = ['LIBRO DE IVA COMPRAS Abril de 2026'];
+      const r = parsearLibroIVA(filas);
+      expect(r.tipo).toBe('compra');
+      expect(r.periodo).toEqual({ anio: 2026, mes: 4 });
+      expect(r.validacion.ok).toBe(true);
+    });
+
+    it('reconoce "LIBRO DE  IVA VENTAS" con espacios extra', () => {
+      const filas = clonar(VENTAS);
+      filas[3] = ['LIBRO DE  IVA VENTAS Abril de 2026'];
+      const r = parsearLibroIVA(filas);
+      expect(r.tipo).toBe('venta');
+      expect(r.periodo).toEqual({ anio: 2026, mes: 4 });
+      expect(r.validacion.ok).toBe(true);
+    });
+  });
+
   describe('totales que no cuadran', () => {
     it('marca validacion.ok=false y lista la diferencia', () => {
       const filas = clonar(COMPRAS);

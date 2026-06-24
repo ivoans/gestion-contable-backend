@@ -74,8 +74,11 @@ const MESES: Record<string, number> = {
   diciembre: 12,
 };
 
+// Algunos estudios exportan el título como "Libro IVA Compras ..." y otros como
+// "LIBRO DE IVA COMPRAS ..." (con "DE" intercalado y espacios variables). Se tolera
+// el "de" opcional y cualquier espaciado; el resto del layout es idéntico.
 const RE_ENCABEZADO =
-  /Libro IVA\s+(Compras|Ventas)\s+([A-Za-zÁÉÍÓÚáéíóúñ]+)\s+de\s+(\d{4})/i;
+  /Libro\s+(?:de\s+)?IVA\s+(Compras|Ventas)\s+([A-Za-zÁÉÍÓÚáéíóúñ]+)\s+de\s+(\d{4})/i;
 const RE_FECHA = /^\d{2}\/\d{2}\/\d{4}$/;
 const RE_CUIT = /\d{2}[-.\s]?\d{8}[-.\s]?\d/;
 
