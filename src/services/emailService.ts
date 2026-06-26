@@ -4,6 +4,15 @@ const resend = new Resend(process.env.RESEND_API_KEY!);
 
 const FROM = process.env.EMAIL_FROM ?? 'Sistema Contable <notificaciones@tudominio.com>';
 
+/**
+ * Resultado de un intento de envío por un canal:
+ *  - 'enviada': el canal mandó el mensaje OK.
+ *  - 'omitida': el canal está apagado (no es un fallo). El llamador NO debe marcar
+ *    la notificación como enviada — así, al prender el canal, se manda recién ahí (B3 sec.).
+ * Un fallo real de envío se propaga como throw (el llamador lo marca 'fallida' y reintenta).
+ */
+export type ResultadoCanal = 'enviada' | 'omitida';
+
 function emailsEnabled(): boolean {
   return process.env.EMAILS_ENABLED === 'true';
 }
@@ -34,10 +43,10 @@ export async function sendNuevoImpuesto(
     monto: number;
     fecha_vencimiento: string;
   }
-): Promise<void> {
+): Promise<ResultadoCanal> {
   if (!emailsEnabled()) {
     console.log(`[email] sendNuevoImpuesto SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
-    return;
+    return 'omitida';
   }
 
   const fechaFormateada = formatFecha(data.fecha_vencimiento);
@@ -74,6 +83,7 @@ export async function sendNuevoImpuesto(
       `,
     });
     console.log(`[email] sendNuevoImpuesto OK → ${to} | ${tipo}`);
+    return 'enviada';
   } catch (err) {
     console.error(`[email] sendNuevoImpuesto FAIL → ${to} | ${data.tipo}`, err);
     throw err;
@@ -87,10 +97,10 @@ export async function sendRecordatorio(
     tipo: string;
     fecha_vencimiento: string;
   }
-): Promise<void> {
+): Promise<ResultadoCanal> {
   if (!emailsEnabled()) {
     console.log(`[email] sendRecordatorio SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
-    return;
+    return 'omitida';
   }
 
   const fechaFormateada = formatFecha(data.fecha_vencimiento);
@@ -114,22 +124,25 @@ export async function sendRecordatorio(
       `,
     });
     console.log(`[email] sendRecordatorio OK → ${to} | ${tipo} | vence ${fechaFormateada}`);
+    return 'enviada';
   } catch (err) {
     console.error(`[email] sendRecordatorio FAIL → ${to} | ${data.tipo}`, err);
     throw err;
   }
 }
 
+// El destinatario es el CONTADOR (el template está redactado para él: "el impuesto X del
+// cliente Y venció, gestionar el pago"). El cron pasa el email de `creado_por` (B2).
 export async function sendVencido(
   to: string,
   data: {
     nombre_cliente: string;
     tipo: string;
   }
-): Promise<void> {
+): Promise<ResultadoCanal> {
   if (!emailsEnabled()) {
     console.log(`[email] sendVencido SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
-    return;
+    return 'omitida';
   }
 
   const tipo = escapeHtml(data.tipo);
@@ -150,6 +163,7 @@ export async function sendVencido(
       `,
     });
     console.log(`[email] sendVencido OK → ${to} | ${tipo}`);
+    return 'enviada';
   } catch (err) {
     console.error(`[email] sendVencido FAIL → ${to} | ${data.tipo}`, err);
     throw err;

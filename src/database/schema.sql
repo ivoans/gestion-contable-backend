@@ -204,14 +204,29 @@ CREATE TABLE vencimientos (
 -- TABLA: notificaciones
 -- ============================================================
 
+-- Entrega desacoplada (ver migración 009): cada aviso lleva su estado_envio y se
+-- reintenta hasta entregarse. Cuelga de un impuesto O de un honorario (exactamente uno).
 CREATE TABLE notificaciones (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  impuesto_id  UUID NOT NULL REFERENCES impuestos(id) ON DELETE CASCADE,
+  impuesto_id  UUID REFERENCES impuestos(id) ON DELETE CASCADE,
+  honorario_id UUID REFERENCES honorarios(id) ON DELETE CASCADE,
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tipo         tipo_notificacion NOT NULL,
   canal        VARCHAR(20) NOT NULL DEFAULT 'email',
-  enviada_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  estado_envio VARCHAR(20) NOT NULL DEFAULT 'pendiente'
+    CHECK (estado_envio IN ('pendiente', 'enviada', 'fallida')),
+  intentos     INTEGER NOT NULL DEFAULT 0,
+  ultimo_error TEXT,
+  enviada_at   TIMESTAMP WITH TIME ZONE,
+  CONSTRAINT chk_notif_target CHECK ((impuesto_id IS NOT NULL) <> (honorario_id IS NOT NULL))
 );
+
+CREATE UNIQUE INDEX uq_notif_impuesto_tipo
+  ON notificaciones (impuesto_id, tipo) WHERE impuesto_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_notif_honorario_tipo
+  ON notificaciones (honorario_id, tipo) WHERE honorario_id IS NOT NULL;
+CREATE INDEX idx_notif_pendientes ON notificaciones (estado_envio)
+  WHERE estado_envio <> 'enviada';
 
 -- ============================================================
 -- TABLA: movimientos (libro IVA compras/ventas)

@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { supabase } from '../lib/supabase';
 import { sendVencido, sendRecordatorio } from '../services/emailService';
+import { entregarNotificacion } from '../services/notificacionesService';
 
 function getDateAR(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }).format(new Date());
@@ -17,7 +18,8 @@ type ImpuestoVencido = {
   cliente_id: string;
   creado_por: string;
   tipo: string;
-  cliente: { email: string; nombre: string };
+  cliente: { nombre: string } | null;
+  contador: { email: string } | null;
 };
 
 type ImpuestoRecordatorio = {
@@ -34,10 +36,25 @@ export async function procesarVencidos(): Promise<void> {
 
   const today = getDateAR();
 
+  // Paso 1 — transición de estado, DESACOPLADA del envío (B3). Marca 'vencido' todos los
+  // pendientes pasados de fecha de una. Idempotente; si falla, igual seguimos al aviso.
+  const { error: transError } = await supabase
+    .from('impuestos')
+    .update({ estado: 'vencido' })
+    .eq('estado', 'pendiente')
+    .lt('fecha_vencimiento', today);
+
+  if (transError) {
+    console.error('[cron:vencidos] Error en transición a vencido:', transError.message);
+  }
+
+  // Paso 2 — avisar al CONTADOR (creado_por, B2) por cada impuesto vencido. Se re-evalúan
+  // todos los vencidos: entregarNotificacion saltea los ya 'enviada' y reintenta los
+  // 'pendiente'/'fallida' (esos eran los que antes se perdían para siempre).
   const { data: vencidos, error } = await supabase
     .from('impuestos')
-    .select('id, cliente_id, creado_por, tipo, cliente:users!cliente_id(email, nombre)')
-    .eq('estado', 'pendiente')
+    .select('id, cliente_id, creado_por, tipo, cliente:users!cliente_id(nombre), contador:users!creado_por(email)')
+    .eq('estado', 'vencido')
     .lt('fecha_vencimiento', today);
 
   if (error) {
@@ -50,48 +67,32 @@ export async function procesarVencidos(): Promise<void> {
     return;
   }
 
-  let procesados = 0;
+  let enviados = 0;
+  let fallidos = 0;
 
   for (const impuesto of vencidos as unknown as ImpuestoVencido[]) {
-    const { data: notifExistente } = await supabase
-      .from('notificaciones')
-      .select('id')
-      .eq('impuesto_id', impuesto.id)
-      .eq('tipo', 'vencido')
-      .maybeSingle();
-
-    if (notifExistente) continue;
-
-    const { error: updateError } = await supabase
-      .from('impuestos')
-      .update({ estado: 'vencido' })
-      .eq('id', impuesto.id);
-
-    if (updateError) {
-      console.error(`[cron:vencidos] Error actualizando ${impuesto.id}:`, updateError.message);
+    const emailContador = impuesto.contador?.email;
+    if (!emailContador) {
+      console.error(`[cron:vencidos] Impuesto ${impuesto.id} sin email de contador (creado_por=${impuesto.creado_por}); se omite.`);
       continue;
     }
 
-    try {
-      await sendVencido(
-        impuesto.cliente.email,
-        { nombre_cliente: impuesto.cliente.nombre, tipo: impuesto.tipo }
-      );
+    const resultado = await entregarNotificacion({
+      target: { impuesto_id: impuesto.id },
+      user_id: impuesto.creado_por,
+      tipo: 'vencido',
+      enviar: () =>
+        sendVencido(emailContador, {
+          nombre_cliente: impuesto.cliente?.nombre ?? '',
+          tipo: impuesto.tipo,
+        }),
+    });
 
-      await supabase.from('notificaciones').insert({
-        impuesto_id: impuesto.id,
-        user_id: impuesto.cliente_id,
-        tipo: 'vencido',
-        canal: 'email',
-      });
-
-      procesados++;
-    } catch (emailErr) {
-      console.error(`[cron:vencidos] Email fail impuesto ${impuesto.id}:`, emailErr);
-    }
+    if (resultado === 'enviada') enviados++;
+    else if (resultado === 'fallida') fallidos++;
   }
 
-  console.log(`[cron:vencidos] Procesados ${procesados}/${vencidos.length}. END ${new Date().toISOString()}`);
+  console.log(`[cron:vencidos] Enviados ${enviados}, fallidos ${fallidos}, total ${vencidos.length}. END ${new Date().toISOString()}`);
 }
 
 export async function procesarRecordatorios(): Promise<void> {
@@ -118,38 +119,28 @@ export async function procesarRecordatorios(): Promise<void> {
   }
 
   let enviados = 0;
+  let fallidos = 0;
 
+  // El recordatorio va al CLIENTE (le avisamos que su impuesto vence en 3 días). La capa
+  // de entrega saltea los ya 'enviada' y reintenta 'pendiente'/'fallida'.
   for (const impuesto of proximos as unknown as ImpuestoRecordatorio[]) {
-    const { data: notifExistente } = await supabase
-      .from('notificaciones')
-      .select('id')
-      .eq('impuesto_id', impuesto.id)
-      .eq('tipo', 'recordatorio_3dias')
-      .maybeSingle();
+    const resultado = await entregarNotificacion({
+      target: { impuesto_id: impuesto.id },
+      user_id: impuesto.cliente_id,
+      tipo: 'recordatorio_3dias',
+      enviar: () =>
+        sendRecordatorio(impuesto.cliente.email, {
+          nombre: impuesto.cliente.nombre,
+          tipo: impuesto.tipo,
+          fecha_vencimiento: impuesto.fecha_vencimiento,
+        }),
+    });
 
-    if (notifExistente) continue;
-
-    try {
-      await sendRecordatorio(impuesto.cliente.email, {
-        nombre: impuesto.cliente.nombre,
-        tipo: impuesto.tipo,
-        fecha_vencimiento: impuesto.fecha_vencimiento,
-      });
-
-      await supabase.from('notificaciones').insert({
-        impuesto_id: impuesto.id,
-        user_id: impuesto.cliente_id,
-        tipo: 'recordatorio_3dias',
-        canal: 'email',
-      });
-
-      enviados++;
-    } catch (emailErr) {
-      console.error(`[cron:recordatorios] Email fail impuesto ${impuesto.id}:`, emailErr);
-    }
+    if (resultado === 'enviada') enviados++;
+    else if (resultado === 'fallida') fallidos++;
   }
 
-  console.log(`[cron:recordatorios] Enviados ${enviados}/${proximos.length}. END ${new Date().toISOString()}`);
+  console.log(`[cron:recordatorios] Enviados ${enviados}, fallidos ${fallidos}, total ${proximos.length}. END ${new Date().toISOString()}`);
 }
 
 export async function runVencimientosCron(): Promise<void> {
