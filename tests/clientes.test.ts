@@ -379,7 +379,7 @@ describe('clientes', () => {
     it('404 si no existe', async () => {
       sb.queue([{ table: 'users', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/clientes/no-existe')
+        .get('/api/clientes/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA);
       expect(res.status).toBe(404);
     });

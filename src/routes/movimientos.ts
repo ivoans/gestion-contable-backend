@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
+import { requireUuidParams } from '../middleware/validateUuid';
 import {
   importarLibroIVA,
   crearMovimiento,
@@ -65,7 +66,7 @@ router.get('/mis-movimientos', authenticate, requireRole('cliente'), listarMisMo
 
 // CRUD de movimientos manuales (rol contador, multi-tenant por estudio_id del token).
 router.post('/', authenticate, requireRole('contador'), crearMovimiento);
-router.patch('/:id', authenticate, requireRole('contador'), actualizarMovimiento);
-router.delete('/:id', authenticate, requireRole('contador'), eliminarMovimiento);
+router.patch('/:id', authenticate, requireRole('contador'), requireUuidParams('id'), actualizarMovimiento);
+router.delete('/:id', authenticate, requireRole('contador'), requireUuidParams('id'), eliminarMovimiento);
 
 export default router;

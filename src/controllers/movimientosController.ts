@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { supabase } from '../lib/supabase';
-import { normalizeCuit } from '../utils/validators';
+import { normalizeCuit, UUID_REGEX } from '../utils/validators';
 import { xlsxBufferAFilas } from '../utils/xlsxReader';
 import { parsearLibroIVA, RegistroLibroIVA } from '../utils/libroIvaParser';
 import {
@@ -14,7 +14,6 @@ import {
 
 const ANIO_MIN = 2024;
 const ANIO_MAX = 2100;
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // 'DD/MM/YYYY' → 'YYYY-MM-DD'. Si ya viene ISO (lo normal en el parser actual),
 // se devuelve igual. La columna `fecha` es DATE y necesita YYYY-MM-DD.

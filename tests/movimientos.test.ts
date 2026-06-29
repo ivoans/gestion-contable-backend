@@ -461,7 +461,7 @@ describe('movimientos — CRUD manual', () => {
         fecha: '2026-04-05',
         total: 121,
         origen: 'manual',
-        creado_por: 'contadorA',
+        creado_por: contadorA.id,
       });
       expect(payload).not.toHaveProperty('concepto_no_gravado');
       expect(payload).not.toHaveProperty('acrecentamiento');

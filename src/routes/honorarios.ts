@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
+import { requireUuidParams } from '../middleware/validateUuid';
 import {
   listarHonorarios,
   resumenHonorarios,
@@ -30,31 +31,69 @@ const router = Router();
 
 // Cliente — registrar antes de /:id para no colisionar.
 router.get('/mis-honorarios', authenticate, requireRole('cliente'), misHonorarios);
-router.patch('/mis-honorarios/:id/estado', authenticate, requireRole('cliente'), pagarMiHonorario);
+router.patch(
+  '/mis-honorarios/:id/estado',
+  authenticate,
+  requireRole('cliente'),
+  requireUuidParams('id'),
+  pagarMiHonorario,
+);
 router.get(
   '/mis-honorarios/:id/comprobante',
   authenticate,
   requireRole('cliente'),
+  requireUuidParams('id'),
   miComprobanteHonorario,
 );
 router.post(
   '/mis-honorarios/:id/comprobante',
   authenticate,
   requireRole('cliente'),
+  requireUuidParams('id'),
   upload.single('archivo'),
   subirMiComprobanteHonorario,
 );
 
 // Contador — rutas literales antes de las paramétricas.
 router.get('/planes', authenticate, requireRole('contador'), listarPlanes);
-router.put('/planes/:clienteId', authenticate, requireRole('contador'), upsertPlan);
+router.put(
+  '/planes/:clienteId',
+  authenticate,
+  requireRole('contador'),
+  requireUuidParams('clienteId'),
+  upsertPlan,
+);
 router.post('/generar', authenticate, requireRole('contador'), generarHonorariosEndpoint);
 router.get('/resumen', authenticate, requireRole('contador'), resumenHonorarios);
 router.get('/', authenticate, requireRole('contador'), listarHonorarios);
-router.get('/:id/comprobante', authenticate, requireRole('contador'), comprobanteDeHonorario);
-router.patch('/:id/estado', authenticate, requireRole('contador'), cambiarEstadoHonorario);
-router.patch('/:id/revertir', authenticate, requireRole('contador'), revertirHonorario);
-router.patch('/:id/anular', authenticate, requireRole('contador'), anularHonorario);
-router.patch('/:id', authenticate, requireRole('contador'), actualizarHonorario);
+router.get(
+  '/:id/comprobante',
+  authenticate,
+  requireRole('contador'),
+  requireUuidParams('id'),
+  comprobanteDeHonorario,
+);
+router.patch(
+  '/:id/estado',
+  authenticate,
+  requireRole('contador'),
+  requireUuidParams('id'),
+  cambiarEstadoHonorario,
+);
+router.patch(
+  '/:id/revertir',
+  authenticate,
+  requireRole('contador'),
+  requireUuidParams('id'),
+  revertirHonorario,
+);
+router.patch(
+  '/:id/anular',
+  authenticate,
+  requireRole('contador'),
+  requireUuidParams('id'),
+  anularHonorario,
+);
+router.patch('/:id', authenticate, requireRole('contador'), requireUuidParams('id'), actualizarHonorario);
 
 export default router;

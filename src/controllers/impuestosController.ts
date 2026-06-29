@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { supabase } from '../lib/supabase';
 import { Impuesto, EstadoImpuesto, Obligacion, CondicionFiscal } from '../types';
 import { sendNuevoImpuesto } from '../services/emailService';
-import { isValidCuit, normalizeCuit } from '../utils/validators';
+import { isValidCuit, normalizeCuit, isValidUuid } from '../utils/validators';
 
 export async function crearImpuesto(req: Request, res: Response): Promise<void> {
   const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, vep } = req.body as {
@@ -16,6 +16,11 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
 
   if (!cliente_id || !tipo || monto === undefined || !fecha_vencimiento) {
     res.status(400).json({ error: 'cliente_id, tipo, monto y fecha_vencimiento son requeridos' });
+    return;
+  }
+
+  if (!isValidUuid(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
     return;
   }
 
@@ -131,6 +136,10 @@ export async function listarImpuestos(req: Request, res: Response): Promise<void
   const estudio_id = req.user!.estudio_id;
   const { cliente_id, estado } = req.query as { cliente_id?: string; estado?: string };
 
+  if (cliente_id && !isValidUuid(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return;
+  }
   if (estado && !ESTADOS_VALIDOS.includes(estado as EstadoImpuesto)) {
     res.status(400).json({ error: 'estado debe ser pendiente, vencido o pagado' });
     return;
