@@ -169,3 +169,45 @@ export async function sendVencido(
     throw err;
   }
 }
+
+// El destinatario es el CLIENTE. Es el gemelo de sendVencido pero con texto propio
+// ("tu impuesto venció, regularizalo"), no el del contador. El cron lo manda como un
+// aviso aparte (tipo 'vencido_cliente') al email de `cliente_id`.
+export async function sendVencidoCliente(
+  to: string,
+  data: {
+    nombre: string;
+    tipo: string;
+  }
+): Promise<ResultadoCanal> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendVencidoCliente SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.tipo}`);
+    return 'omitida';
+  }
+
+  const tipo = escapeHtml(data.tipo);
+  const nombre = escapeHtml(data.nombre);
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `⚠️ Venció tu impuesto: ${tipo}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#dc2626">⚠️ Tu impuesto venció</h2>
+          <p>Hola <strong>${nombre}</strong>,</p>
+          <p>Tu impuesto <strong>${tipo}</strong> venció sin registrar el pago.</p>
+          <p>Regularizá el pago a la brevedad para evitar intereses y recargos. Si ya pagaste,
+          subí el comprobante o avisale a tu contador.</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendVencidoCliente OK → ${to} | ${tipo}`);
+    return 'enviada';
+  } catch (err) {
+    console.error(`[email] sendVencidoCliente FAIL → ${to} | ${data.tipo}`, err);
+    throw err;
+  }
+}

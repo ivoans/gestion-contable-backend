@@ -10,11 +10,12 @@ const { sb } = await vi.hoisted(async () => {
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
 
 // Canales mockeados: controlamos enviada / omitida (canal off) / throw (fallo real).
-const { sendVencido, sendRecordatorio } = vi.hoisted(() => ({
+const { sendVencido, sendVencidoCliente, sendRecordatorio } = vi.hoisted(() => ({
   sendVencido: vi.fn(),
+  sendVencidoCliente: vi.fn(),
   sendRecordatorio: vi.fn(),
 }));
-vi.mock('../src/services/emailService', () => ({ sendVencido, sendRecordatorio }));
+vi.mock('../src/services/emailService', () => ({ sendVencido, sendVencidoCliente, sendRecordatorio }));
 
 import { procesarVencidos, procesarRecordatorios } from '../src/jobs/vencimientosCron';
 
@@ -40,6 +41,7 @@ describe('cron · procesarVencidos', () => {
   beforeEach(() => {
     sb.reset();
     sendVencido.mockReset();
+    sendVencidoCliente.mockReset();
   });
 
   it('B2: el aviso de vencido va al CONTADOR (creado_por), no al cliente', async () => {
@@ -131,6 +133,82 @@ describe('cron · procesarVencidos', () => {
     await procesarVencidos();
 
     expect(sendVencido).not.toHaveBeenCalled();
+  });
+
+  // Item 1: además del contador, el CLIENTE recibe una copia con texto propio.
+  const impVencidoConCliente = {
+    ...impVencido,
+    cliente: { nombre: 'Juan', email: 'cliente@mail.com' },
+  };
+
+  it('item1: avisa también al CLIENTE (tipo vencido_cliente) con su propio texto', async () => {
+    sendVencido.mockResolvedValue('enviada');
+    sendVencidoCliente.mockResolvedValue('enviada');
+    sb.queue([
+      transicion(),
+      selectVencidos([impVencidoConCliente]),
+      // entrega al contador
+      notifLookup(null),
+      notifInsert('notif-cont'),
+      notifUpdate(),
+      // entrega al cliente
+      notifLookup(null),
+      notifInsert('notif-cli'),
+      notifUpdate(),
+    ]);
+
+    await procesarVencidos();
+
+    expect(sendVencido).toHaveBeenCalledTimes(1);
+    expect(sendVencido).toHaveBeenCalledWith('contador@estudio.com', { nombre_cliente: 'Juan', tipo: 'IVA' });
+    expect(sendVencidoCliente).toHaveBeenCalledTimes(1);
+    expect(sendVencidoCliente).toHaveBeenCalledWith('cliente@mail.com', { nombre: 'Juan', tipo: 'IVA' });
+
+    // La copia al cliente es una fila de notificación independiente (dedup por tipo).
+    const insertCli = sb.calls.find(
+      (c) => c.table === 'notificaciones' && c.op === 'insert' && c.payload?.tipo === 'vencido_cliente',
+    );
+    expect(insertCli?.payload).toMatchObject({
+      tipo: 'vencido_cliente',
+      user_id: 'cli1',
+      impuesto_id: 'imp1',
+      estado_envio: 'pendiente',
+    });
+  });
+
+  it('item1: el aviso al cliente es independiente del del contador (uno falla, el otro va)', async () => {
+    sendVencido.mockRejectedValue(new Error('resend 500')); // contador falla
+    sendVencidoCliente.mockResolvedValue('enviada'); // cliente OK
+    sb.queue([
+      transicion(),
+      selectVencidos([impVencidoConCliente]),
+      notifLookup(null),
+      notifInsert('notif-cont'),
+      notifUpdate(),
+      notifLookup(null),
+      notifInsert('notif-cli'),
+      notifUpdate(),
+    ]);
+
+    await procesarVencidos();
+
+    expect(sendVencidoCliente).toHaveBeenCalledTimes(1);
+    // El contador quedó 'fallida' (se reintenta) y el cliente 'enviada': son filas distintas.
+    const updCli = sb.calls.find(
+      (c) => c.table === 'notificaciones' && c.op === 'update' && c.payload?.estado_envio === 'enviada',
+    );
+    expect(updCli).toBeTruthy();
+  });
+
+  it('item1: sin email de cliente, igual avisa al contador y no rompe', async () => {
+    sendVencido.mockResolvedValue('enviada');
+    // impVencido base no tiene email de cliente.
+    sb.queue([transicion(), selectVencidos([impVencido]), notifLookup(null), notifInsert(), notifUpdate()]);
+
+    await procesarVencidos();
+
+    expect(sendVencido).toHaveBeenCalledTimes(1);
+    expect(sendVencidoCliente).not.toHaveBeenCalled();
   });
 });
 

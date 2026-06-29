@@ -38,7 +38,7 @@ export async function entregarNotificacion(params: {
   target: Target;
   /** Destinatario (a quién apunta el aviso). Para 'vencido' es el contador (creado_por). */
   user_id: string;
-  tipo: 'nuevo' | 'recordatorio_3dias' | 'vencido';
+  tipo: 'nuevo' | 'recordatorio_3dias' | 'vencido' | 'vencido_cliente';
   canal?: string;
   enviar: () => Promise<ResultadoCanal>;
 }): Promise<ResultadoEntrega> {
