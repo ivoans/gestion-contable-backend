@@ -38,7 +38,10 @@ function registroAFila(r: RegistroLibroIVA): Record<string, unknown> {
     iva: r.iva,
     acrecentamiento: r.acrecentamiento,
     total: r.total,
-    retenciones_percepciones: r.retenciones_percepciones,
+    // F4: no importar ret/percepciones del excel. La contadora las carga a mano
+    // desde "Cargar movimiento"; así son la única fuente y el saldo IVA las resta
+    // sin riesgo de doble conteo.
+    retenciones_percepciones: null,
     op_exentas: r.op_exentas,
   };
 }
@@ -550,7 +553,12 @@ function calcularResumen(movs: Movimiento[], anio: number, mes: number): Resumen
     periodo: { anio, mes },
     ventas,
     compras,
-    iva: { debito: ventas.iva, credito: compras.iva, saldo: round2(ventas.iva - compras.iva) },
+    // F4: el saldo a pagar resta las ret/percepciones (ventas + compras), cargadas a mano.
+    iva: {
+      debito: ventas.iva,
+      credito: compras.iva,
+      saldo: round2(ventas.iva - compras.iva - ventas.ret_perc - compras.ret_perc),
+    },
     por_alicuota: calcularPorAlicuota(movs),
   };
 }
@@ -687,7 +695,8 @@ function tendenciaDelMes(anio: number, mes: number, movs: Movimiento[]): Tendenc
     compras_total: compras.total,
     iva_debito: ventas.iva,
     iva_credito: compras.iva,
-    iva_saldo: round2(ventas.iva - compras.iva),
+    // F4: mismo ajuste que calcularResumen para que la tendencia sea consistente con la card.
+    iva_saldo: round2(ventas.iva - compras.iva - ventas.ret_perc - compras.ret_perc),
   };
 }
 
