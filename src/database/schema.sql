@@ -386,3 +386,51 @@ BEGIN
   RETURN jsonb_build_object('borrados', v_borrados, 'insertados', v_insertados);
 END;
 $$;
+
+-- ============================================================
+-- TABLA: monotributo_escala (migración 011)
+-- ============================================================
+-- Escala de categorías (letra + tope anual) por estudio, editada por la contadora.
+-- Los clientes NO ven esta tabla; solo su posición calculada en el backend.
+CREATE TABLE monotributo_escala (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id  UUID NOT NULL REFERENCES estudios(id) ON DELETE CASCADE,
+  categoria   TEXT NOT NULL,
+  tope_anual  DECIMAL(15, 2) NOT NULL CHECK (tope_anual > 0),
+  orden       SMALLINT NOT NULL,
+  updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_monotributo_escala_estudio_cat UNIQUE (estudio_id, categoria)
+);
+
+CREATE INDEX idx_monotributo_escala_estudio ON monotributo_escala (estudio_id, orden);
+
+-- ============================================================
+-- TABLA: monotributo_facturacion (migración 011)
+-- ============================================================
+-- Facturación mensual del cliente monotributista, del export AFIP "Mis Comprobantes
+-- Emitidos". Un import por mes; UNIQUE (cliente_id, periodo) hace idempotente el upsert.
+CREATE TABLE monotributo_facturacion (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  periodo       DATE NOT NULL,
+  monto         DECIMAL(15, 2) NOT NULL,
+  comprobantes  INTEGER NOT NULL DEFAULT 0,
+  origen        TEXT NOT NULL DEFAULT 'importado',
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_monotributo_facturacion_cliente_periodo UNIQUE (cliente_id, periodo)
+);
+
+CREATE INDEX idx_monotributo_facturacion_cliente ON monotributo_facturacion (cliente_id, periodo);
+CREATE INDEX idx_monotributo_facturacion_estudio ON monotributo_facturacion (estudio_id);
+
+CREATE TRIGGER trg_monotributo_escala_updated_at
+  BEFORE UPDATE ON monotributo_escala
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_monotributo_facturacion_updated_at
+  BEFORE UPDATE ON monotributo_facturacion
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
