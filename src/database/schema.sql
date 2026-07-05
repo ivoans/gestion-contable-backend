@@ -206,13 +206,16 @@ CREATE TABLE vencimientos (
 
 -- Entrega desacoplada (ver migración 009): cada aviso lleva su estado_envio y se
 -- reintenta hasta entregarse. Cuelga de un impuesto O de un honorario (exactamente uno).
+-- Desde la 012 el dedup es por (target, tipo, canal): el mismo aviso puede existir
+-- una vez por canal (email/push), cada uno con su propio estado/reintento.
 CREATE TABLE notificaciones (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   impuesto_id  UUID REFERENCES impuestos(id) ON DELETE CASCADE,
   honorario_id UUID REFERENCES honorarios(id) ON DELETE CASCADE,
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tipo         tipo_notificacion NOT NULL,
-  canal        VARCHAR(20) NOT NULL DEFAULT 'email',
+  canal        VARCHAR(20) NOT NULL DEFAULT 'email'
+    CHECK (canal IN ('email', 'push')),
   estado_envio VARCHAR(20) NOT NULL DEFAULT 'pendiente'
     CHECK (estado_envio IN ('pendiente', 'enviada', 'fallida')),
   intentos     INTEGER NOT NULL DEFAULT 0,
@@ -221,12 +224,30 @@ CREATE TABLE notificaciones (
   CONSTRAINT chk_notif_target CHECK ((impuesto_id IS NOT NULL) <> (honorario_id IS NOT NULL))
 );
 
-CREATE UNIQUE INDEX uq_notif_impuesto_tipo
-  ON notificaciones (impuesto_id, tipo) WHERE impuesto_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_notif_honorario_tipo
-  ON notificaciones (honorario_id, tipo) WHERE honorario_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_notif_impuesto_tipo_canal
+  ON notificaciones (impuesto_id, tipo, canal) WHERE impuesto_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_notif_honorario_tipo_canal
+  ON notificaciones (honorario_id, tipo, canal) WHERE honorario_id IS NOT NULL;
 CREATE INDEX idx_notif_pendientes ON notificaciones (estado_envio)
   WHERE estado_envio <> 'enviada';
+
+-- ============================================================
+-- TABLA: push_subscriptions (Web Push, migración 012)
+-- ============================================================
+
+-- Una fila por endpoint de navegador (un usuario puede tener varias: teléfono +
+-- desktop). endpoint UNIQUE permite upsert de re-suscripción y traspaso al user
+-- logueado actual. Las subs muertas (404/410 del push service) se limpian al enviar.
+CREATE TABLE push_subscriptions (
+  id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint   TEXT NOT NULL UNIQUE,
+  p256dh     TEXT NOT NULL,
+  auth       TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_push_subs_user ON push_subscriptions (user_id);
 
 -- ============================================================
 -- TABLA: movimientos (libro IVA compras/ventas)
@@ -291,7 +312,7 @@ CREATE INDEX idx_movimientos_libro
 
 -- notificaciones
 CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
--- Índice compuesto para el anti-duplicado del cron
+-- Índice de lectura para el lookup del dedup (el unique real es por tipo+canal, ver arriba)
 CREATE INDEX idx_notificaciones_dedup ON notificaciones(impuesto_id, tipo);
 
 -- ============================================================

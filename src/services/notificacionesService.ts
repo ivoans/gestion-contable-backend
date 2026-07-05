@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
 import type { ResultadoCanal } from './emailService';
+import type { TipoNotificacion, CanalNotificacion } from '../types';
 
 /**
  * Capa de entrega de notificaciones — desacopla "hay que avisar" del "se mandó".
@@ -29,28 +30,30 @@ function targetCol(target: Target): { col: 'impuesto_id' | 'honorario_id'; val: 
 }
 
 /**
- * Garantiza una fila de notificación para (target, tipo) e intenta entregarla.
+ * Garantiza una fila de notificación para (target, tipo, canal) e intenta entregarla.
  * Idempotente y reintentable: si ya está 'enviada' no hace nada; si no existe la crea
  * 'pendiente'; ante un envío exitoso la marca 'enviada', omitido la deja 'pendiente',
- * y con error la marca 'fallida' (para reintentar).
+ * y con error la marca 'fallida' (para reintentar). Email y push son entregas
+ * independientes: cada canal tiene su propia fila con su propio estado/reintento.
  */
 export async function entregarNotificacion(params: {
   target: Target;
   /** Destinatario (a quién apunta el aviso). Para 'vencido' es el contador (creado_por). */
   user_id: string;
-  tipo: 'nuevo' | 'recordatorio_3dias' | 'vencido' | 'vencido_cliente';
-  canal?: string;
+  tipo: TipoNotificacion;
+  canal?: CanalNotificacion;
   enviar: () => Promise<ResultadoCanal>;
 }): Promise<ResultadoEntrega> {
   const { target, user_id, tipo, canal = 'email', enviar } = params;
   const { col, val } = targetCol(target);
 
-  // Dedup: ¿ya hay una fila para este (target, tipo)?
+  // Dedup: ¿ya hay una fila para este (target, tipo, canal)?
   const { data: existente, error: findErr } = await supabase
     .from('notificaciones')
     .select('id, estado_envio, intentos')
     .eq(col, val)
     .eq('tipo', tipo)
+    .eq('canal', canal)
     .maybeSingle();
 
   if (findErr) throw new Error(`No se pudo leer notificaciones: ${findErr.message}`);
@@ -75,6 +78,7 @@ export async function entregarNotificacion(params: {
         .select('id, estado_envio, intentos')
         .eq(col, val)
         .eq('tipo', tipo)
+        .eq('canal', canal)
         .maybeSingle();
       const reread = again as { id: string; estado_envio: string; intentos: number } | null;
       if (reread?.estado_envio === 'enviada') return 'ya_enviada';

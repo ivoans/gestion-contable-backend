@@ -5,11 +5,12 @@ import type { SupabaseMock } from './helpers/supabaseMock';
 import { makeUser, makeImpuesto } from './helpers/factories';
 import { bearerFor } from './helpers/auth';
 
-const { sb, emailMock } = await vi.hoisted(async () => {
+const { sb, emailMock, pushMock } = await vi.hoisted(async () => {
   const { createSupabaseMock } = await import('./helpers/supabaseMock');
   return {
     sb: createSupabaseMock() as SupabaseMock,
     emailMock: { sendNuevoImpuesto: vi.fn() },
+    pushMock: { sendPushToUser: vi.fn() },
   };
 });
 
@@ -21,6 +22,9 @@ vi.mock('../src/middleware/userStatus', () => ({
 }));
 vi.mock('../src/services/emailService', () => ({
   sendNuevoImpuesto: emailMock.sendNuevoImpuesto,
+}));
+vi.mock('../src/services/pushService', () => ({
+  sendPushToUser: pushMock.sendPushToUser,
 }));
 
 import { createApp } from '../src/app';
@@ -50,9 +54,23 @@ describe('impuestos', () => {
   beforeEach(() => {
     sb.reset();
     emailMock.sendNuevoImpuesto.mockReset();
-    emailMock.sendNuevoImpuesto.mockResolvedValue(undefined);
+    emailMock.sendNuevoImpuesto.mockResolvedValue('enviada');
+    // Default 'omitida' (sin subs): la fila push queda pendiente sin update.
+    pushMock.sendPushToUser.mockReset();
+    pushMock.sendPushToUser.mockResolvedValue('omitida');
     app = createApp();
   });
+
+  // Cola de despacharAvisoNuevo: select del cliente + entrega email (lookup/insert/update
+  // si el send resuelve 'enviada') + entrega push (lookup/insert; 'omitida' no updatea).
+  const colaAvisoNuevo = (email = clienteA.email, nombre = clienteA.nombre) => [
+    { table: 'users', result: { data: { email, nombre }, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'notif-email' }, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'notif-push' }, error: null } },
+  ];
 
   describe('POST /api/impuestos', () => {
     it('401 sin token', async () => {
@@ -145,7 +163,7 @@ describe('impuestos', () => {
       expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
     });
 
-    it('201 + insert + email + notif (happy path)', async () => {
+    it('201 + insert + aviso nuevo por email y push (happy path)', async () => {
       const created = makeImpuesto({
         cliente_id: clienteA.id,
         estudio_id: 'estudio-A',
@@ -156,8 +174,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
 
       const res = await request(app)
@@ -193,24 +210,26 @@ describe('impuestos', () => {
         }),
       );
 
-      // Notif registrada.
-      const notifCall = sb.calls[3];
-      expect(notifCall.op).toBe('insert');
-      expect(notifCall.payload).toMatchObject({
-        impuesto_id: created.id,
-        user_id: clienteA.id,
-        tipo: 'nuevo',
-        canal: 'email',
-      });
+      // Push intentado (una fila de notificación por canal).
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledWith(
+        clienteA.id,
+        expect.objectContaining({ url: '/cliente' }),
+      );
+
+      const insertsNotif = sb.calls.filter((c) => c.table === 'notificaciones' && c.op === 'insert');
+      expect(insertsNotif.map((c) => c.payload)).toEqual([
+        expect.objectContaining({ impuesto_id: created.id, user_id: clienteA.id, tipo: 'nuevo', canal: 'email' }),
+        expect.objectContaining({ impuesto_id: created.id, user_id: clienteA.id, tipo: 'nuevo', canal: 'push' }),
+      ]);
     });
 
-    it('201 aunque email falle (no rompe el flujo)', async () => {
+    it('201 aunque email falle (no rompe el flujo; la fila queda fallida y el push sale igual)', async () => {
       const created = makeImpuesto({ cliente_id: clienteA.id, estudio_id: 'estudio-A' });
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        // notificaciones NO se llama porque el send falla antes.
+        ...colaAvisoNuevo(),
       ]);
       emailMock.sendNuevoImpuesto.mockRejectedValueOnce(new Error('resend down'));
 
@@ -221,7 +240,12 @@ describe('impuestos', () => {
 
       expect(res.status).toBe(201);
       expect(res.body).toEqual(created);
-      expect(sb.calls).toHaveLength(3); // sin notif insert
+      // La fila email quedó 'fallida' (reintentable) y el push se intentó igual.
+      const updFallida = sb.calls.find(
+        (c) => c.table === 'notificaciones' && c.op === 'update' && c.payload?.estado_envio === 'fallida',
+      );
+      expect(updFallida?.payload.ultimo_error).toContain('resend down');
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
     });
 
     it('descripcion null si no enviada', async () => {
@@ -229,8 +253,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
         .post('/api/impuestos')
@@ -259,8 +282,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
         .post('/api/impuestos')
@@ -394,10 +416,12 @@ describe('impuestos', () => {
     });
 
     it('completa borrador con monto + vep → transiciona a pendiente, persiste monto y vep', async () => {
-      const updated = makeImpuesto({ estado: 'pendiente', monto: 2000, vep: '1234567890' });
+      const updated = makeImpuesto({ cliente_id: clienteA.id, estado: 'pendiente', monto: 2000, vep: '1234567890' });
       sb.queue([
         { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador', monto: null }, error: null } },
         { table: 'impuestos', result: { data: updated, error: null } },
+        // La transición borrador→pendiente dispara el aviso 'nuevo' (email + push).
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
         .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
@@ -407,6 +431,11 @@ describe('impuestos', () => {
       expect(res.body).toEqual(updated);
       expect(sb.calls[1].op).toBe('update');
       expect(sb.calls[1].payload).toEqual({ monto: 2000, vep: '1234567890', estado: 'pendiente' });
+
+      // Aviso 'nuevo' al cliente por ambos canales.
+      expect(emailMock.sendNuevoImpuesto).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledWith(updated.cliente_id, expect.anything());
     });
 
     it('borrador solo con vep (sin monto) → sigue borrador, monto no se setea', async () => {
@@ -424,6 +453,9 @@ describe('impuestos', () => {
       expect(sb.calls[1].payload).toEqual({ vep: 'VEP-9' });
       expect(sb.calls[1].payload.estado).toBeUndefined();
       expect(sb.calls[1].payload).not.toHaveProperty('monto');
+      // Sin transición → sin aviso.
+      expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+      expect(pushMock.sendPushToUser).not.toHaveBeenCalled();
     });
 
     it('400 si monto = 0 sobre un borrador (no transiciona)', async () => {

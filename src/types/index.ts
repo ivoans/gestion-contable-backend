@@ -1,7 +1,8 @@
 export type Role = 'admin' | 'contador' | 'cliente';
 export type CondicionFiscal = 'monotributista' | 'responsable_inscripto';
 export type EstadoImpuesto = 'borrador' | 'pendiente' | 'vencido' | 'pagado';
-export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido';
+export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido' | 'vencido_cliente';
+export type CanalNotificacion = 'email' | 'push';
 export type Obligacion =
   | 'monotributo'
   | 'iva'

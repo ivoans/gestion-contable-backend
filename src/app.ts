@@ -13,6 +13,7 @@ import vencimientosRouter from './routes/vencimientos';
 import internalRouter from './routes/internal';
 import configRouter from './routes/config';
 import monotributoRouter from './routes/monotributo';
+import pushRouter from './routes/push';
 import { errorHandler } from './middleware/errorHandler';
 
 export function createApp(): Express {
@@ -56,6 +57,7 @@ export function createApp(): Express {
   app.use('/api/internal', internalRouter);
   app.use('/api/config', configRouter);
   app.use('/api/monotributo', monotributoRouter);
+  app.use('/api/push', pushRouter);
 
   // Error handler al FINAL del pipeline: convierte todo error en JSON
   // (Multer, CORS, JSON malformado, etc.). Ver middleware/errorHandler.ts.

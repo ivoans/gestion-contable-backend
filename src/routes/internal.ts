@@ -1,7 +1,12 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { procesarVencidos, procesarRecordatorios } from '../jobs/vencimientosCron';
-import { procesarHonorariosVencidos, generarHonorariosMesActual } from '../jobs/honorariosCron';
+import {
+  procesarHonorariosVencidos,
+  notificarHonorariosNuevos,
+  procesarHonorariosRecordatorios,
+  generarHonorariosMesActual,
+} from '../jobs/honorariosCron';
 
 const router = Router();
 
@@ -35,6 +40,8 @@ type Job =
   | 'vencidos'
   | 'recordatorios'
   | 'honorarios_vencidos'
+  | 'honorarios_nuevos'
+  | 'honorarios_recordatorios'
   | 'honorarios_generar'
   | 'all';
 
@@ -42,6 +49,8 @@ const JOBS: Job[] = [
   'vencidos',
   'recordatorios',
   'honorarios_vencidos',
+  'honorarios_nuevos',
+  'honorarios_recordatorios',
   'honorarios_generar',
   'all',
 ];
@@ -73,6 +82,14 @@ router.post('/run-cron', requireCronSecret, async (req: Request, res: Response):
     if (target === 'honorarios_vencidos' || target === 'all') {
       await procesarHonorariosVencidos();
       ran.push('honorarios_vencidos');
+    }
+    if (target === 'honorarios_nuevos' || target === 'all') {
+      await notificarHonorariosNuevos();
+      ran.push('honorarios_nuevos');
+    }
+    if (target === 'honorarios_recordatorios' || target === 'all') {
+      await procesarHonorariosRecordatorios();
+      ran.push('honorarios_recordatorios');
     }
     res.json({ status: 'ok', ran });
   } catch (err) {

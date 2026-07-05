@@ -170,6 +170,141 @@ export async function sendVencido(
   }
 }
 
+// ── Honorarios (los tres avisos van al CLIENTE) ─────────────────────────────
+
+export async function sendNuevoHonorario(
+  to: string,
+  data: {
+    nombre: string;
+    descripcion: string;
+    monto: number;
+    fecha_vencimiento: string;
+  }
+): Promise<ResultadoCanal> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendNuevoHonorario SKIP (EMAILS_ENABLED!=true) → ${to}`);
+    return 'omitida';
+  }
+
+  const fechaFormateada = formatFecha(data.fecha_vencimiento);
+  const montoFormateado = formatMonto(data.monto);
+  const nombre = escapeHtml(data.nombre);
+  const descripcion = escapeHtml(data.descripcion);
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Nuevos honorarios: ${descripcion}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#1e293b">Nuevos honorarios</h2>
+          <p>Hola <strong>${nombre}</strong>,</p>
+          <p>Se generaron tus honorarios del período:</p>
+          <table style="border-collapse:collapse;width:100%;margin:16px 0">
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600;width:40%">Concepto</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${descripcion}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600">Monto</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${montoFormateado}</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 12px;background:#f1f5f9;font-weight:600">Vencimiento</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${fechaFormateada}</td>
+            </tr>
+          </table>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendNuevoHonorario OK → ${to} | ${data.descripcion}`);
+    return 'enviada';
+  } catch (err) {
+    console.error(`[email] sendNuevoHonorario FAIL → ${to} | ${data.descripcion}`, err);
+    throw err;
+  }
+}
+
+export async function sendRecordatorioHonorario(
+  to: string,
+  data: {
+    nombre: string;
+    descripcion: string;
+    fecha_vencimiento: string;
+  }
+): Promise<ResultadoCanal> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendRecordatorioHonorario SKIP (EMAILS_ENABLED!=true) → ${to}`);
+    return 'omitida';
+  }
+
+  const fechaFormateada = formatFecha(data.fecha_vencimiento);
+  const nombre = escapeHtml(data.nombre);
+  const descripcion = escapeHtml(data.descripcion);
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Recordatorio: honorarios vencen el ${fechaFormateada}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#d97706">⏰ Recordatorio de honorarios</h2>
+          <p>Hola <strong>${nombre}</strong>,</p>
+          <p>Te recordamos que tus honorarios (<strong>${descripcion}</strong>) vencen en <strong>3 días</strong>:</p>
+          <p style="font-size:20px;font-weight:700;color:#dc2626">📅 ${fechaFormateada}</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendRecordatorioHonorario OK → ${to} | vence ${fechaFormateada}`);
+    return 'enviada';
+  } catch (err) {
+    console.error(`[email] sendRecordatorioHonorario FAIL → ${to}`, err);
+    throw err;
+  }
+}
+
+export async function sendHonorarioVencidoCliente(
+  to: string,
+  data: {
+    nombre: string;
+    descripcion: string;
+  }
+): Promise<ResultadoCanal> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendHonorarioVencidoCliente SKIP (EMAILS_ENABLED!=true) → ${to}`);
+    return 'omitida';
+  }
+
+  const nombre = escapeHtml(data.nombre);
+  const descripcion = escapeHtml(data.descripcion);
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `⚠️ Vencieron tus honorarios: ${descripcion}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#dc2626">⚠️ Tus honorarios vencieron</h2>
+          <p>Hola <strong>${nombre}</strong>,</p>
+          <p>Tus honorarios (<strong>${descripcion}</strong>) vencieron sin registrar el pago.</p>
+          <p>Regularizá el pago a la brevedad. Si ya pagaste, subí el comprobante o avisale a tu contador.</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendHonorarioVencidoCliente OK → ${to} | ${data.descripcion}`);
+    return 'enviada';
+  } catch (err) {
+    console.error(`[email] sendHonorarioVencidoCliente FAIL → ${to} | ${data.descripcion}`, err);
+    throw err;
+  }
+}
+
 // El destinatario es el CLIENTE. Es el gemelo de sendVencido pero con texto propio
 // ("tu impuesto venció, regularizalo"), no el del contador. El cron lo manda como un
 // aviso aparte (tipo 'vencido_cliente') al email de `cliente_id`.

@@ -1,17 +1,9 @@
 import cron from 'node-cron';
 import { supabase } from '../lib/supabase';
 import { sendVencido, sendVencidoCliente, sendRecordatorio } from '../services/emailService';
+import { sendPushToUser } from '../services/pushService';
 import { entregarNotificacion } from '../services/notificacionesService';
-
-function getDateAR(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }).format(new Date());
-}
-
-function addDays(dateStr: string, days: number): string {
-  const d = new Date(`${dateStr}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().split('T')[0];
-}
+import { getDateAR, addDays, formatFechaCorta } from '../utils/fechas';
 
 type ImpuestoVencido = {
   id: string;
@@ -114,6 +106,22 @@ export async function procesarVencidos(): Promise<void> {
     } else {
       console.error(`[cron:vencidos] Impuesto ${impuesto.id} sin email de cliente (cliente_id=${impuesto.cliente_id}); se omite el aviso al cliente.`);
     }
+
+    // Mismo aviso al cliente por push (canal aditivo, fila de dedup propia).
+    contar(
+      await entregarNotificacion({
+        target: { impuesto_id: impuesto.id },
+        user_id: impuesto.cliente_id,
+        tipo: 'vencido_cliente',
+        canal: 'push',
+        enviar: () =>
+          sendPushToUser(impuesto.cliente_id, {
+            title: 'Venció tu impuesto',
+            body: `${impuesto.tipo} venció sin registrar el pago.`,
+            url: '/cliente',
+          }),
+      }),
+    );
   }
 
   console.log(`[cron:vencidos] Enviados ${enviados}, fallidos ${fallidos}, total ${vencidos.length}. END ${new Date().toISOString()}`);
@@ -145,23 +153,42 @@ export async function procesarRecordatorios(): Promise<void> {
   let enviados = 0;
   let fallidos = 0;
 
+  const contar = (resultado: string) => {
+    if (resultado === 'enviada') enviados++;
+    else if (resultado === 'fallida') fallidos++;
+  };
+
   // El recordatorio va al CLIENTE (le avisamos que su impuesto vence en 3 días). La capa
   // de entrega saltea los ya 'enviada' y reintenta 'pendiente'/'fallida'.
   for (const impuesto of proximos as unknown as ImpuestoRecordatorio[]) {
-    const resultado = await entregarNotificacion({
-      target: { impuesto_id: impuesto.id },
-      user_id: impuesto.cliente_id,
-      tipo: 'recordatorio_3dias',
-      enviar: () =>
-        sendRecordatorio(impuesto.cliente.email, {
-          nombre: impuesto.cliente.nombre,
-          tipo: impuesto.tipo,
-          fecha_vencimiento: impuesto.fecha_vencimiento,
-        }),
-    });
+    contar(
+      await entregarNotificacion({
+        target: { impuesto_id: impuesto.id },
+        user_id: impuesto.cliente_id,
+        tipo: 'recordatorio_3dias',
+        enviar: () =>
+          sendRecordatorio(impuesto.cliente.email, {
+            nombre: impuesto.cliente.nombre,
+            tipo: impuesto.tipo,
+            fecha_vencimiento: impuesto.fecha_vencimiento,
+          }),
+      }),
+    );
 
-    if (resultado === 'enviada') enviados++;
-    else if (resultado === 'fallida') fallidos++;
+    contar(
+      await entregarNotificacion({
+        target: { impuesto_id: impuesto.id },
+        user_id: impuesto.cliente_id,
+        tipo: 'recordatorio_3dias',
+        canal: 'push',
+        enviar: () =>
+          sendPushToUser(impuesto.cliente_id, {
+            title: 'Recordatorio de vencimiento',
+            body: `${impuesto.tipo} vence el ${formatFechaCorta(impuesto.fecha_vencimiento)}.`,
+            url: '/cliente',
+          }),
+      }),
+    );
   }
 
   console.log(`[cron:recordatorios] Enviados ${enviados}, fallidos ${fallidos}, total ${proximos.length}. END ${new Date().toISOString()}`);
