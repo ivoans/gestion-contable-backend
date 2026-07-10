@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { supabase } from '../lib/supabase';
 import { Honorario, HonorarioPlan, EstadoHonorario } from '../types';
 import { generarHonorarios, generarHonorarioClienteMesActual } from '../services/honorariosService';
+import { isValidUuid } from '../utils/validators';
 
 const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
 const PERIODO_RE = /^\d{4}-\d{2}$/;
@@ -27,6 +28,10 @@ export async function listarHonorarios(req: Request, res: Response): Promise<voi
     periodo?: string;
   };
 
+  if (cliente_id && !isValidUuid(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return;
+  }
   if (estado && !ESTADOS_VALIDOS.includes(estado as EstadoHonorario)) {
     res.status(400).json({ error: 'estado inválido' });
     return;

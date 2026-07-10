@@ -2,7 +2,55 @@ import { Request, Response } from 'express';
 import { supabase } from '../lib/supabase';
 import { Impuesto, EstadoImpuesto, Obligacion, CondicionFiscal } from '../types';
 import { sendNuevoImpuesto } from '../services/emailService';
-import { isValidCuit, normalizeCuit } from '../utils/validators';
+import { sendPushToUser } from '../services/pushService';
+import { entregarNotificacion } from '../services/notificacionesService';
+import { isValidCuit, normalizeCuit, isValidUuid } from '../utils/validators';
+import { formatFechaCorta } from '../utils/fechas';
+
+// Aviso 'nuevo' al CLIENTE (email + push) para un impuesto que quedó listo para pagar:
+// creación manual o borrador que pasó a 'pendiente' al cargarle el monto. Entrega vía
+// la capa de notificaciones (dedup por canal + registro del intento); un fallo del
+// aviso nunca voltea el request (el impuesto ya quedó guardado).
+async function despacharAvisoNuevo(impuesto: Impuesto): Promise<void> {
+  try {
+    const { data: cliente } = await supabase
+      .from('users')
+      .select('email, nombre')
+      .eq('id', impuesto.cliente_id)
+      .single();
+
+    if (!cliente) return;
+    const { email, nombre } = cliente as { email: string; nombre: string };
+
+    await entregarNotificacion({
+      target: { impuesto_id: impuesto.id },
+      user_id: impuesto.cliente_id,
+      tipo: 'nuevo',
+      enviar: () =>
+        sendNuevoImpuesto(email, {
+          nombre,
+          tipo: impuesto.tipo,
+          monto: impuesto.monto as number,
+          fecha_vencimiento: impuesto.fecha_vencimiento,
+        }),
+    });
+
+    await entregarNotificacion({
+      target: { impuesto_id: impuesto.id },
+      user_id: impuesto.cliente_id,
+      tipo: 'nuevo',
+      canal: 'push',
+      enviar: () =>
+        sendPushToUser(impuesto.cliente_id, {
+          title: 'Nuevo vencimiento',
+          body: `${impuesto.tipo} — vence el ${formatFechaCorta(impuesto.fecha_vencimiento)}.`,
+          url: '/cliente',
+        }),
+    });
+  } catch (err) {
+    console.error('[impuestos] Aviso nuevo falló (impuesto guardado OK):', err);
+  }
+}
 
 export async function crearImpuesto(req: Request, res: Response): Promise<void> {
   const { cliente_id, tipo, monto, fecha_vencimiento, descripcion, vep } = req.body as {
@@ -16,6 +64,11 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
 
   if (!cliente_id || !tipo || monto === undefined || !fecha_vencimiento) {
     res.status(400).json({ error: 'cliente_id, tipo, monto y fecha_vencimiento son requeridos' });
+    return;
+  }
+
+  if (!isValidUuid(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
     return;
   }
 
@@ -93,31 +146,7 @@ export async function crearImpuesto(req: Request, res: Response): Promise<void> 
 
     const nuevoImpuesto = data as Impuesto;
 
-    try {
-      const { data: clienteData } = await supabase
-        .from('users')
-        .select('email, nombre')
-        .eq('id', cliente_id)
-        .single();
-
-      if (clienteData) {
-        await sendNuevoImpuesto(clienteData.email, {
-          nombre: clienteData.nombre,
-          tipo: nuevoImpuesto.tipo,
-          monto: nuevoImpuesto.monto,
-          fecha_vencimiento: nuevoImpuesto.fecha_vencimiento,
-        });
-
-        await supabase.from('notificaciones').insert({
-          impuesto_id: nuevoImpuesto.id,
-          user_id: cliente_id,
-          tipo: 'nuevo',
-          canal: 'email',
-        });
-      }
-    } catch (emailErr) {
-      console.error('[crearImpuesto] Email fail, impuesto creado OK:', emailErr);
-    }
+    await despacharAvisoNuevo(nuevoImpuesto);
 
     res.status(201).json(nuevoImpuesto);
   } catch {
@@ -131,6 +160,10 @@ export async function listarImpuestos(req: Request, res: Response): Promise<void
   const estudio_id = req.user!.estudio_id;
   const { cliente_id, estado } = req.query as { cliente_id?: string; estado?: string };
 
+  if (cliente_id && !isValidUuid(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return;
+  }
   if (estado && !ESTADOS_VALIDOS.includes(estado as EstadoImpuesto)) {
     res.status(400).json({ error: 'estado debe ser pendiente, vencido o pagado' });
     return;
@@ -280,6 +313,13 @@ export async function actualizarImpuesto(req: Request, res: Response): Promise<v
     if (error || !data) {
       res.status(500).json({ error: 'Error interno del servidor' });
       return;
+    }
+
+    // El borrador quedó listo para pagar (monto cargado): avisar al cliente. Es el
+    // camino principal del aviso 'nuevo' — la mayoría de los impuestos nacen como
+    // borrador de la generación masiva.
+    if (actual.estado === 'borrador' && updates.estado === 'pendiente') {
+      await despacharAvisoNuevo(data as Impuesto);
     }
 
     res.json(data as Impuesto);

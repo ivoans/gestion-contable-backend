@@ -4,6 +4,17 @@ export function isValidEmail(email: unknown): email is string {
   return typeof email === 'string' && email.length <= 254 && EMAIL_REGEX.test(email);
 }
 
+export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Valida que el valor sea un UUID (string con el formato canónico). Útil para
+ * params/query antes de tocar la DB: un id no-UUID llega a PostgREST como `22P02`
+ * y devuelve un 500 genérico en vez de un 400/404 limpio.
+ */
+export function isValidUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_REGEX.test(value);
+}
+
 const CUIT_WEIGHTS = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
 
 /**

@@ -301,7 +301,8 @@ describe('movimientos — POST /api/movimientos/importar', () => {
     expect(rpc.args.p_registros[0]).not.toHaveProperty('estudio_id');
     // DD/MM/YYYY → YYYY-MM-DD.
     expect(rpc.args.p_registros[1].fecha).toBe('2026-04-05');
-    expect(rpc.args.p_registros[1].retenciones_percepciones).toBe(10);
+    // F4: el import NO persiste ret/percepciones del excel (las carga la contadora a mano).
+    expect(rpc.args.p_registros[1].retenciones_percepciones).toBeNull();
   });
 });
 
@@ -461,7 +462,7 @@ describe('movimientos — CRUD manual', () => {
         fecha: '2026-04-05',
         total: 121,
         origen: 'manual',
-        creado_por: 'contadorA',
+        creado_por: contadorA.id,
       });
       expect(payload).not.toHaveProperty('concepto_no_gravado');
       expect(payload).not.toHaveProperty('acrecentamiento');
@@ -847,6 +848,23 @@ describe('movimientos — LECTURA', () => {
       // No se filtró por tipo (trae todo el período).
       expect(sb.calls[1].filters).toContainEqual(['eq', 'periodo', '2026-04-01']);
       expect(sb.calls[1].filters.some((f) => f[0] === 'eq' && f[1] === 'tipo')).toBe(false);
+    });
+
+    it('200 ret/percepciones restan del saldo a pagar (ventas + compras)', async () => {
+      // F4: saldo = débito − crédito − ret_perc(ventas) − ret_perc(compras).
+      const filas = [
+        makeMov({ tipo: 'venta', neto: '100.00', iva: '21.00', total: '121.00', retenciones_percepciones: '5.00' }),
+        makeMov({ tipo: 'compra', neto: '50.00', iva: '5.25', total: '55.25', retenciones_percepciones: '3.00' }),
+      ];
+      sb.queue([clienteOk, { table: 'movimientos', result: { data: filas, error: null } }]);
+
+      const res = await resumen(authA, baseQuery);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ventas.ret_perc).toBe(5);
+      expect(res.body.compras.ret_perc).toBe(3);
+      // débito 21 − crédito 5.25 − ret 5 − ret 3 = 7.75
+      expect(res.body.iva).toEqual({ debito: 21, credito: 5.25, saldo: 7.75 });
     });
 
     it('200 iva=null (monotributista): suma 0 y no entra en por_alicuota', async () => {

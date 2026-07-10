@@ -189,7 +189,7 @@ describe('admin', () => {
     it('404 si no existe', async () => {
       sb.queue([{ table: 'users', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/admin/contadores/no-existe')
+        .get('/api/admin/contadores/00000000-0000-4000-8000-000000000000')
         .set('Authorization', adminAuth);
       expect(res.status).toBe(404);
     });
@@ -210,7 +210,7 @@ describe('admin', () => {
     it('404 si contador no existe', async () => {
       sb.queue([{ table: 'users', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/admin/contadores/no-existe')
+        .patch('/api/admin/contadores/00000000-0000-4000-8000-000000000000')
         .set('Authorization', adminAuth)
         .send({ nombre: 'Nuevo' });
       expect(res.status).toBe(404);
@@ -306,7 +306,7 @@ describe('admin', () => {
     it('404 si contador no existe', async () => {
       sb.queue([{ table: 'users', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/admin/contadores/no-existe/estado')
+        .patch('/api/admin/contadores/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', adminAuth)
         .send({ activo: false });
       expect(res.status).toBe(404);

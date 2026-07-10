@@ -156,7 +156,7 @@ describe('Honorarios — contador', () => {
       { table: 'honorarios', resultSingle: { data: makeHonorario({ monto: 60000 }), error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/hon-1')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000')
       .set('Authorization', authC())
       .send({ monto: 60000 });
     expect(res.status).toBe(200);
@@ -168,7 +168,7 @@ describe('Honorarios — contador', () => {
       { table: 'honorarios', resultMaybeSingle: { data: { id: 'hon-1', estado: 'pagado' }, error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/hon-1')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000')
       .set('Authorization', authC())
       .send({ monto: 60000 });
     expect(res.status).toBe(400);
@@ -176,7 +176,7 @@ describe('Honorarios — contador', () => {
 
   it('PATCH /api/honorarios/:id 400 sin campos', async () => {
     const res = await request(app)
-      .patch('/api/honorarios/hon-1')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000')
       .set('Authorization', authC())
       .send({});
     expect(res.status).toBe(400);
@@ -188,7 +188,7 @@ describe('Honorarios — contador', () => {
       { table: 'honorarios', resultSingle: { data: makeHonorario({ estado: 'pagado', pagado_at: 'x', pagado_por: contador.id }), error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/hon-1/estado')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000/estado')
       .set('Authorization', authC());
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('pagado');
@@ -199,7 +199,7 @@ describe('Honorarios — contador', () => {
       { table: 'honorarios', resultMaybeSingle: { data: { id: 'hon-1', estado: 'pendiente', fecha_vencimiento: '2026-06-10' }, error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/hon-1/revertir')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000/revertir')
       .set('Authorization', authC());
     expect(res.status).toBe(400);
   });
@@ -209,9 +209,52 @@ describe('Honorarios — contador', () => {
       { table: 'honorarios', resultMaybeSingle: { data: { id: 'hon-1', estado: 'pagado' }, error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/hon-1/anular')
+      .patch('/api/honorarios/00000000-0000-4000-8000-000000000000/anular')
       .set('Authorization', authC());
     expect(res.status).toBe(400);
+  });
+});
+
+// B6: un id/cliente_id no-UUID se corta con 400 antes de tocar la DB (PostgREST 22P02 → 500).
+describe('Honorarios — validación UUID (B6)', () => {
+  let app: ReturnType<typeof createApp>;
+  beforeEach(() => {
+    sb.reset();
+    app = createApp();
+  });
+
+  it('PATCH /api/honorarios/:id con id no-UUID → 400 sin tocar la DB', async () => {
+    const res = await request(app)
+      .patch('/api/honorarios/no-es-uuid')
+      .set('Authorization', authC())
+      .send({ monto: 1000 });
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('GET /api/honorarios?cliente_id no-UUID → 400 sin tocar la DB', async () => {
+    const res = await request(app)
+      .get('/api/honorarios?cliente_id=no-es-uuid')
+      .set('Authorization', authC());
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('PUT /api/honorarios/planes/:clienteId con id no-UUID → 400 sin tocar la DB', async () => {
+    const res = await request(app)
+      .put('/api/honorarios/planes/no-es-uuid')
+      .set('Authorization', authC())
+      .send({ monto: 50000 });
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('PATCH /api/honorarios/mis-honorarios/:id/estado con id no-UUID → 400 (cliente)', async () => {
+    const res = await request(app)
+      .patch('/api/honorarios/mis-honorarios/no-es-uuid/estado')
+      .set('Authorization', authCli());
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
   });
 });
 
@@ -255,7 +298,7 @@ describe('Honorarios — planes', () => {
       { table: 'users', resultMaybeSingle: { data: null, error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .put('/api/honorarios/planes/desconocido')
+      .put('/api/honorarios/planes/00000000-0000-4000-8000-000000000000')
       .set('Authorization', authC())
       .send({ monto: 50000 });
     expect(res.status).toBe(404);
@@ -316,7 +359,7 @@ describe('Honorarios — cliente', () => {
       { table: 'honorarios', resultSingle: { data: makeHonorario({ estado: 'pagado', pagado_at: 'x', pagado_por: cliente.id }), error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/mis-honorarios/h1/estado')
+      .patch('/api/honorarios/mis-honorarios/00000000-0000-4000-8000-000000000000/estado')
       .set('Authorization', authCli());
     expect(res.status).toBe(200);
     expect(res.body.estado).toBe('pagado');
@@ -327,7 +370,7 @@ describe('Honorarios — cliente', () => {
       { table: 'honorarios', resultMaybeSingle: { data: { id: 'h1', estado: 'anulado' }, error: null }, result: { data: null, error: null } },
     ]);
     const res = await request(app)
-      .patch('/api/honorarios/mis-honorarios/h1/estado')
+      .patch('/api/honorarios/mis-honorarios/00000000-0000-4000-8000-000000000000/estado')
       .set('Authorization', authCli());
     expect(res.status).toBe(404);
   });

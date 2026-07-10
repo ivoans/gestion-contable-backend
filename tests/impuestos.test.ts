@@ -5,11 +5,12 @@ import type { SupabaseMock } from './helpers/supabaseMock';
 import { makeUser, makeImpuesto } from './helpers/factories';
 import { bearerFor } from './helpers/auth';
 
-const { sb, emailMock } = await vi.hoisted(async () => {
+const { sb, emailMock, pushMock } = await vi.hoisted(async () => {
   const { createSupabaseMock } = await import('./helpers/supabaseMock');
   return {
     sb: createSupabaseMock() as SupabaseMock,
     emailMock: { sendNuevoImpuesto: vi.fn() },
+    pushMock: { sendPushToUser: vi.fn() },
   };
 });
 
@@ -21,6 +22,9 @@ vi.mock('../src/middleware/userStatus', () => ({
 }));
 vi.mock('../src/services/emailService', () => ({
   sendNuevoImpuesto: emailMock.sendNuevoImpuesto,
+}));
+vi.mock('../src/services/pushService', () => ({
+  sendPushToUser: pushMock.sendPushToUser,
 }));
 
 import { createApp } from '../src/app';
@@ -50,9 +54,23 @@ describe('impuestos', () => {
   beforeEach(() => {
     sb.reset();
     emailMock.sendNuevoImpuesto.mockReset();
-    emailMock.sendNuevoImpuesto.mockResolvedValue(undefined);
+    emailMock.sendNuevoImpuesto.mockResolvedValue('enviada');
+    // Default 'omitida' (sin subs): la fila push queda pendiente sin update.
+    pushMock.sendPushToUser.mockReset();
+    pushMock.sendPushToUser.mockResolvedValue('omitida');
     app = createApp();
   });
+
+  // Cola de despacharAvisoNuevo: select del cliente + entrega email (lookup/insert/update
+  // si el send resuelve 'enviada') + entrega push (lookup/insert; 'omitida' no updatea).
+  const colaAvisoNuevo = (email = clienteA.email, nombre = clienteA.nombre) => [
+    { table: 'users', result: { data: { email, nombre }, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'notif-email' }, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'notif-push' }, error: null } },
+  ];
 
   describe('POST /api/impuestos', () => {
     it('401 sin token', async () => {
@@ -145,7 +163,7 @@ describe('impuestos', () => {
       expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
     });
 
-    it('201 + insert + email + notif (happy path)', async () => {
+    it('201 + insert + aviso nuevo por email y push (happy path)', async () => {
       const created = makeImpuesto({
         cliente_id: clienteA.id,
         estudio_id: 'estudio-A',
@@ -156,8 +174,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
 
       const res = await request(app)
@@ -193,24 +210,26 @@ describe('impuestos', () => {
         }),
       );
 
-      // Notif registrada.
-      const notifCall = sb.calls[3];
-      expect(notifCall.op).toBe('insert');
-      expect(notifCall.payload).toMatchObject({
-        impuesto_id: created.id,
-        user_id: clienteA.id,
-        tipo: 'nuevo',
-        canal: 'email',
-      });
+      // Push intentado (una fila de notificación por canal).
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledWith(
+        clienteA.id,
+        expect.objectContaining({ url: '/cliente' }),
+      );
+
+      const insertsNotif = sb.calls.filter((c) => c.table === 'notificaciones' && c.op === 'insert');
+      expect(insertsNotif.map((c) => c.payload)).toEqual([
+        expect.objectContaining({ impuesto_id: created.id, user_id: clienteA.id, tipo: 'nuevo', canal: 'email' }),
+        expect.objectContaining({ impuesto_id: created.id, user_id: clienteA.id, tipo: 'nuevo', canal: 'push' }),
+      ]);
     });
 
-    it('201 aunque email falle (no rompe el flujo)', async () => {
+    it('201 aunque email falle (no rompe el flujo; la fila queda fallida y el push sale igual)', async () => {
       const created = makeImpuesto({ cliente_id: clienteA.id, estudio_id: 'estudio-A' });
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        // notificaciones NO se llama porque el send falla antes.
+        ...colaAvisoNuevo(),
       ]);
       emailMock.sendNuevoImpuesto.mockRejectedValueOnce(new Error('resend down'));
 
@@ -221,7 +240,12 @@ describe('impuestos', () => {
 
       expect(res.status).toBe(201);
       expect(res.body).toEqual(created);
-      expect(sb.calls).toHaveLength(3); // sin notif insert
+      // La fila email quedó 'fallida' (reintentable) y el push se intentó igual.
+      const updFallida = sb.calls.find(
+        (c) => c.table === 'notificaciones' && c.op === 'update' && c.payload?.estado_envio === 'fallida',
+      );
+      expect(updFallida?.payload.ultimo_error).toContain('resend down');
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
     });
 
     it('descripcion null si no enviada', async () => {
@@ -229,8 +253,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
         .post('/api/impuestos')
@@ -259,8 +282,7 @@ describe('impuestos', () => {
       sb.queue([
         { table: 'users', result: { data: { id: clienteA.id }, error: null } },
         { table: 'impuestos', result: { data: created, error: null } },
-        { table: 'users', result: { data: { email: clienteA.email, nombre: clienteA.nombre }, error: null } },
-        { table: 'notificaciones', result: { data: null, error: null } },
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
         .post('/api/impuestos')
@@ -313,7 +335,7 @@ describe('impuestos', () => {
     it('404 si cross-estudio', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/impuestos/x-id')
+        .get('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authB);
       expect(res.status).toBe(404);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
@@ -333,7 +355,7 @@ describe('impuestos', () => {
   describe('PATCH /api/impuestos/:id', () => {
     it('400 si monto negativo', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ monto: -1 });
       expect(res.status).toBe(400);
@@ -342,7 +364,7 @@ describe('impuestos', () => {
 
     it('400 si fecha mal formato', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ fecha_vencimiento: '01-2030-15' });
       expect(res.status).toBe(400);
@@ -350,7 +372,7 @@ describe('impuestos', () => {
 
     it('400 si ningún campo enviado', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(400);
@@ -359,7 +381,7 @@ describe('impuestos', () => {
     it('404 si cross-estudio', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authB)
         .send({ tipo: 'Otro' });
       expect(res.status).toBe(404);
@@ -370,7 +392,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: { id: 'x', estado: 'pagado' }, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ tipo: 'Otro' });
       expect(res.status).toBe(400);
@@ -384,7 +406,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ tipo: 'Nuevo', monto: 2000 });
       expect(res.status).toBe(200);
@@ -394,19 +416,26 @@ describe('impuestos', () => {
     });
 
     it('completa borrador con monto + vep → transiciona a pendiente, persiste monto y vep', async () => {
-      const updated = makeImpuesto({ estado: 'pendiente', monto: 2000, vep: '1234567890' });
+      const updated = makeImpuesto({ cliente_id: clienteA.id, estado: 'pendiente', monto: 2000, vep: '1234567890' });
       sb.queue([
         { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador', monto: null }, error: null } },
         { table: 'impuestos', result: { data: updated, error: null } },
+        // La transición borrador→pendiente dispara el aviso 'nuevo' (email + push).
+        ...colaAvisoNuevo(),
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ monto: 2000, vep: ' 1234567890 ' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual(updated);
       expect(sb.calls[1].op).toBe('update');
       expect(sb.calls[1].payload).toEqual({ monto: 2000, vep: '1234567890', estado: 'pendiente' });
+
+      // Aviso 'nuevo' al cliente por ambos canales.
+      expect(emailMock.sendNuevoImpuesto).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledOnce();
+      expect(pushMock.sendPushToUser).toHaveBeenCalledWith(updated.cliente_id, expect.anything());
     });
 
     it('borrador solo con vep (sin monto) → sigue borrador, monto no se setea', async () => {
@@ -416,7 +445,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ vep: 'VEP-9' });
       expect(res.status).toBe(200);
@@ -424,11 +453,14 @@ describe('impuestos', () => {
       expect(sb.calls[1].payload).toEqual({ vep: 'VEP-9' });
       expect(sb.calls[1].payload.estado).toBeUndefined();
       expect(sb.calls[1].payload).not.toHaveProperty('monto');
+      // Sin transición → sin aviso.
+      expect(emailMock.sendNuevoImpuesto).not.toHaveBeenCalled();
+      expect(pushMock.sendPushToUser).not.toHaveBeenCalled();
     });
 
     it('400 si monto = 0 sobre un borrador (no transiciona)', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ monto: 0, vep: 'V1' });
       expect(res.status).toBe(400);
@@ -442,7 +474,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', authA)
         .send({ monto: 3000, vep: 'V2' });
       expect(res.status).toBe(200);
@@ -455,7 +487,7 @@ describe('impuestos', () => {
     it('404 si no existe / cross-estudio', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(404);
@@ -466,7 +498,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: { id: 'x', estado: 'pagado' }, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(400);
@@ -478,7 +510,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(400);
@@ -494,7 +526,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(200);
@@ -516,7 +548,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({ estado: 'vencido' });
       expect(res.status).toBe(200);
@@ -530,7 +562,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/estado')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(200);
@@ -539,13 +571,13 @@ describe('impuestos', () => {
 
   describe('PATCH /api/impuestos/mis-impuestos/:id/estado (cliente paga)', () => {
     it('401 sin token', async () => {
-      const res = await request(app).patch('/api/impuestos/mis-impuestos/x/estado').send({});
+      const res = await request(app).patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado').send({});
       expect(res.status).toBe(401);
     });
 
     it('403 si role=contador', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(403);
@@ -554,7 +586,7 @@ describe('impuestos', () => {
     it('404 si no existe / no es del cliente', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', clienteAuth)
         .send({});
       expect(res.status).toBe(404);
@@ -565,7 +597,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: { id: 'x', estado: 'borrador' }, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', clienteAuth)
         .send({});
       expect(res.status).toBe(404);
@@ -578,7 +610,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: { id: 'x', estado: 'pagado' }, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', clienteAuth)
         .send({});
       expect(res.status).toBe(400);
@@ -592,7 +624,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/mis-impuestos/x/estado')
+        .patch('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/estado')
         .set('Authorization', clienteAuth)
         .send({});
       expect(res.status).toBe(200);
@@ -608,7 +640,7 @@ describe('impuestos', () => {
   describe('PATCH /api/impuestos/:id/revertir (contador revierte)', () => {
     it('403 si role=cliente', async () => {
       const res = await request(app)
-        .patch('/api/impuestos/x/revertir')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/revertir')
         .set('Authorization', clienteAuth)
         .send({});
       expect(res.status).toBe(403);
@@ -617,7 +649,7 @@ describe('impuestos', () => {
     it('404 si no existe / cross-estudio', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/impuestos/x/revertir')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/revertir')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(404);
@@ -631,7 +663,7 @@ describe('impuestos', () => {
         },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/revertir')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/revertir')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(400);
@@ -649,7 +681,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/revertir')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/revertir')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(200);
@@ -670,7 +702,7 @@ describe('impuestos', () => {
         { table: 'impuestos', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
-        .patch('/api/impuestos/x/revertir')
+        .patch('/api/impuestos/00000000-0000-4000-8000-000000000000/revertir')
         .set('Authorization', authA)
         .send({});
       expect(res.status).toBe(200);
@@ -763,7 +795,7 @@ describe('impuestos', () => {
     it('404 si impuesto no es del cliente', async () => {
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/impuestos/mis-impuestos/de-otro')
+        .get('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', clienteAuth);
       expect(res.status).toBe(404);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
@@ -783,10 +815,10 @@ describe('impuestos', () => {
       // DB devuelve null porque el filtro estudio_id NO matchea aunque cliente_id e id sí.
       sb.queue([{ table: 'impuestos', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/impuestos/mis-impuestos/cualquier-id')
+        .get('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000')
         .set('Authorization', clienteAuth);
       expect(res.status).toBe(404);
-      expect(sb.calls[0].filters).toContainEqual(['eq', 'id', 'cualquier-id']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'id', '00000000-0000-4000-8000-000000000000']);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', clienteA.id]);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', clienteA.estudio_id]);
     });

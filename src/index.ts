@@ -8,6 +8,14 @@ if (process.env.NODE_ENV !== 'test') {
       throw new Error(`Variable de entorno requerida no definida: ${key}`);
     }
   }
+
+  if (process.env.PUSH_ENABLED === 'true') {
+    for (const key of ['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT'] as const) {
+      if (!process.env[key]) {
+        throw new Error(`PUSH_ENABLED=true requiere ${key} (generar con: npx web-push generate-vapid-keys)`);
+      }
+    }
+  }
 }
 
 import { createApp } from './app';

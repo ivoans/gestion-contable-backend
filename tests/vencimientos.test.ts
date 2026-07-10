@@ -71,12 +71,12 @@ describe('vencimientos', () => {
     });
 
     it('DELETE 401 sin token', async () => {
-      const res = await request(app).delete('/api/vencimientos/x');
+      const res = await request(app).delete('/api/vencimientos/00000000-0000-4000-8000-000000000000');
       expect(res.status).toBe(401);
     });
 
     it('DELETE 403 si role=admin', async () => {
-      const res = await request(app).delete('/api/vencimientos/x').set('Authorization', adminAuth);
+      const res = await request(app).delete('/api/vencimientos/00000000-0000-4000-8000-000000000000').set('Authorization', adminAuth);
       expect(res.status).toBe(403);
     });
   });
@@ -439,14 +439,14 @@ describe('vencimientos', () => {
   describe('DELETE /api/vencimientos/:id', () => {
     it('404 si inexistente', async () => {
       sb.queue([{ table: 'vencimientos', result: { data: [], error: null } }]);
-      const res = await request(app).delete('/api/vencimientos/x').set('Authorization', authA);
+      const res = await request(app).delete('/api/vencimientos/00000000-0000-4000-8000-000000000000').set('Authorization', authA);
       expect(res.status).toBe(404);
       expect(res.body).toEqual({ error: 'Vencimiento no encontrado' });
     });
 
     it('404 cross-estudio (id de otro estudio → no matchea por eq estudio_id)', async () => {
       sb.queue([{ table: 'vencimientos', result: { data: [], error: null } }]);
-      const res = await request(app).delete('/api/vencimientos/de-A').set('Authorization', authB);
+      const res = await request(app).delete('/api/vencimientos/11111111-1111-4111-8111-111111111111').set('Authorization', authB);
       expect(res.status).toBe(404);
       expect(sb.calls[0].op).toBe('delete');
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-B']);
@@ -454,17 +454,17 @@ describe('vencimientos', () => {
 
     it('204 sin body al borrar OK + filtra por estudio_id del JWT', async () => {
       sb.queue([{ table: 'vencimientos', result: { data: [{ id: 'v1' }], error: null } }]);
-      const res = await request(app).delete('/api/vencimientos/v1').set('Authorization', authA);
+      const res = await request(app).delete('/api/vencimientos/00000000-0000-4000-8000-000000000000').set('Authorization', authA);
       expect(res.status).toBe(204);
       expect(res.body).toEqual({});
       expect(sb.calls[0].op).toBe('delete');
-      expect(sb.calls[0].filters).toContainEqual(['eq', 'id', 'v1']);
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'id', '00000000-0000-4000-8000-000000000000']);
       expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-A']);
     });
 
     it('500 si la DB da error', async () => {
       sb.queue([{ table: 'vencimientos', result: { data: null, error: { message: 'boom' } } }]);
-      const res = await request(app).delete('/api/vencimientos/v1').set('Authorization', authA);
+      const res = await request(app).delete('/api/vencimientos/00000000-0000-4000-8000-000000000000').set('Authorization', authA);
       expect(res.status).toBe(500);
     });
   });

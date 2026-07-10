@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth';
 import { requireRole } from '../middleware/roles';
+import { requireUuidParams } from '../middleware/validateUuid';
 import {
   listarVencimientos,
   reemplazarVencimientosAnio,
@@ -11,6 +12,6 @@ const router = Router();
 
 router.get('/', authenticate, requireRole('contador'), listarVencimientos);
 router.put('/', authenticate, requireRole('contador'), reemplazarVencimientosAnio);
-router.delete('/:id', authenticate, requireRole('contador'), eliminarVencimiento);
+router.delete('/:id', authenticate, requireRole('contador'), requireUuidParams('id'), eliminarVencimiento);
 
 export default router;

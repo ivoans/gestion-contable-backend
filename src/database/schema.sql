@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TYPE role AS ENUM ('admin', 'contador', 'cliente');
 CREATE TYPE estado_impuesto AS ENUM ('pendiente', 'vencido', 'pagado', 'borrador');
 CREATE TYPE estado_honorario AS ENUM ('pendiente', 'vencido', 'pagado', 'anulado');
-CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido');
+CREATE TYPE tipo_notificacion AS ENUM ('nuevo', 'recordatorio_3dias', 'vencido', 'vencido_cliente');
 CREATE TYPE condicion_fiscal AS ENUM ('monotributista', 'responsable_inscripto');
 CREATE TYPE obligacion AS ENUM ('monotributo', 'iva', 'autonomos', 'ingresos_brutos');
 CREATE TYPE movimiento_tipo AS ENUM ('compra', 'venta');
@@ -204,14 +204,50 @@ CREATE TABLE vencimientos (
 -- TABLA: notificaciones
 -- ============================================================
 
+-- Entrega desacoplada (ver migración 009): cada aviso lleva su estado_envio y se
+-- reintenta hasta entregarse. Cuelga de un impuesto O de un honorario (exactamente uno).
+-- Desde la 012 el dedup es por (target, tipo, canal): el mismo aviso puede existir
+-- una vez por canal (email/push), cada uno con su propio estado/reintento.
 CREATE TABLE notificaciones (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  impuesto_id  UUID NOT NULL REFERENCES impuestos(id) ON DELETE CASCADE,
+  impuesto_id  UUID REFERENCES impuestos(id) ON DELETE CASCADE,
+  honorario_id UUID REFERENCES honorarios(id) ON DELETE CASCADE,
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tipo         tipo_notificacion NOT NULL,
-  canal        VARCHAR(20) NOT NULL DEFAULT 'email',
-  enviada_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+  canal        VARCHAR(20) NOT NULL DEFAULT 'email'
+    CHECK (canal IN ('email', 'push')),
+  estado_envio VARCHAR(20) NOT NULL DEFAULT 'pendiente'
+    CHECK (estado_envio IN ('pendiente', 'enviada', 'fallida')),
+  intentos     INTEGER NOT NULL DEFAULT 0,
+  ultimo_error TEXT,
+  enviada_at   TIMESTAMP WITH TIME ZONE,
+  CONSTRAINT chk_notif_target CHECK ((impuesto_id IS NOT NULL) <> (honorario_id IS NOT NULL))
 );
+
+CREATE UNIQUE INDEX uq_notif_impuesto_tipo_canal
+  ON notificaciones (impuesto_id, tipo, canal) WHERE impuesto_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_notif_honorario_tipo_canal
+  ON notificaciones (honorario_id, tipo, canal) WHERE honorario_id IS NOT NULL;
+CREATE INDEX idx_notif_pendientes ON notificaciones (estado_envio)
+  WHERE estado_envio <> 'enviada';
+
+-- ============================================================
+-- TABLA: push_subscriptions (Web Push, migración 012)
+-- ============================================================
+
+-- Una fila por endpoint de navegador (un usuario puede tener varias: teléfono +
+-- desktop). endpoint UNIQUE permite upsert de re-suscripción y traspaso al user
+-- logueado actual. Las subs muertas (404/410 del push service) se limpian al enviar.
+CREATE TABLE push_subscriptions (
+  id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint   TEXT NOT NULL UNIQUE,
+  p256dh     TEXT NOT NULL,
+  auth       TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_push_subs_user ON push_subscriptions (user_id);
 
 -- ============================================================
 -- TABLA: movimientos (libro IVA compras/ventas)
@@ -276,7 +312,7 @@ CREATE INDEX idx_movimientos_libro
 
 -- notificaciones
 CREATE INDEX idx_notificaciones_impuesto_id ON notificaciones(impuesto_id);
--- Índice compuesto para el anti-duplicado del cron
+-- Índice de lectura para el lookup del dedup (el unique real es por tipo+canal, ver arriba)
 CREATE INDEX idx_notificaciones_dedup ON notificaciones(impuesto_id, tipo);
 
 -- ============================================================
@@ -371,3 +407,51 @@ BEGIN
   RETURN jsonb_build_object('borrados', v_borrados, 'insertados', v_insertados);
 END;
 $$;
+
+-- ============================================================
+-- TABLA: monotributo_escala (migración 011)
+-- ============================================================
+-- Escala de categorías (letra + tope anual) por estudio, editada por la contadora.
+-- Los clientes NO ven esta tabla; solo su posición calculada en el backend.
+CREATE TABLE monotributo_escala (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id  UUID NOT NULL REFERENCES estudios(id) ON DELETE CASCADE,
+  categoria   TEXT NOT NULL,
+  tope_anual  DECIMAL(15, 2) NOT NULL CHECK (tope_anual > 0),
+  orden       SMALLINT NOT NULL,
+  updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_monotributo_escala_estudio_cat UNIQUE (estudio_id, categoria)
+);
+
+CREATE INDEX idx_monotributo_escala_estudio ON monotributo_escala (estudio_id, orden);
+
+-- ============================================================
+-- TABLA: monotributo_facturacion (migración 011)
+-- ============================================================
+-- Facturación mensual del cliente monotributista, del export AFIP "Mis Comprobantes
+-- Emitidos". Un import por mes; UNIQUE (cliente_id, periodo) hace idempotente el upsert.
+CREATE TABLE monotributo_facturacion (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  periodo       DATE NOT NULL,
+  monto         DECIMAL(15, 2) NOT NULL,
+  comprobantes  INTEGER NOT NULL DEFAULT 0,
+  origen        TEXT NOT NULL DEFAULT 'importado',
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT uq_monotributo_facturacion_cliente_periodo UNIQUE (cliente_id, periodo)
+);
+
+CREATE INDEX idx_monotributo_facturacion_cliente ON monotributo_facturacion (cliente_id, periodo);
+CREATE INDEX idx_monotributo_facturacion_estudio ON monotributo_facturacion (estudio_id);
+
+CREATE TRIGGER trg_monotributo_escala_updated_at
+  BEFORE UPDATE ON monotributo_escala
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_monotributo_facturacion_updated_at
+  BEFORE UPDATE ON monotributo_facturacion
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();

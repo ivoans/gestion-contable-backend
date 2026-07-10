@@ -37,13 +37,13 @@ describe('comprobantes + flag por estudio', () => {
 
   describe('POST /api/impuestos/mis-impuestos/:id/comprobante', () => {
     it('401 sin token', async () => {
-      const res = await request(app).post('/api/impuestos/mis-impuestos/x/comprobante');
+      const res = await request(app).post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante');
       expect(res.status).toBe(401);
     });
 
     it('403 si role=contador', async () => {
       const res = await request(app)
-        .post('/api/impuestos/mis-impuestos/x/comprobante')
+        .post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', authA);
       expect(res.status).toBe(403);
     });
@@ -53,7 +53,7 @@ describe('comprobantes + flag por estudio', () => {
         { table: 'estudios', result: { data: { comprobantes_habilitados: false }, error: null } },
       ]);
       const res = await request(app)
-        .post('/api/impuestos/mis-impuestos/x/comprobante')
+        .post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', clienteAuth)
         .attach('archivo', jpg(), { filename: 'f.jpg', contentType: 'image/jpeg' });
       expect(res.status).toBe(403);
@@ -65,7 +65,7 @@ describe('comprobantes + flag por estudio', () => {
         { table: 'estudios', result: { data: { comprobantes_habilitados: true }, error: null } },
       ]);
       const res = await request(app)
-        .post('/api/impuestos/mis-impuestos/x/comprobante')
+        .post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', clienteAuth);
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/archivo/i);
@@ -76,7 +76,7 @@ describe('comprobantes + flag por estudio', () => {
         { table: 'estudios', result: { data: { comprobantes_habilitados: true }, error: null } },
       ]);
       const res = await request(app)
-        .post('/api/impuestos/mis-impuestos/x/comprobante')
+        .post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', clienteAuth)
         .attach('archivo', Buffer.from('texto'), { filename: 'f.txt', contentType: 'text/plain' });
       expect(res.status).toBe(400);
@@ -88,7 +88,7 @@ describe('comprobantes + flag por estudio', () => {
         { table: 'impuestos', result: { data: null, error: null } },
       ]);
       const res = await request(app)
-        .post('/api/impuestos/mis-impuestos/x/comprobante')
+        .post('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', clienteAuth)
         .attach('archivo', jpg(), { filename: 'f.jpg', contentType: 'image/jpeg' });
       expect(res.status).toBe(404);
@@ -99,7 +99,7 @@ describe('comprobantes + flag por estudio', () => {
     it('cliente — 404 sin comprobante', async () => {
       sb.queue([{ table: 'comprobantes_pago', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/impuestos/mis-impuestos/x/comprobante')
+        .get('/api/impuestos/mis-impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', clienteAuth);
       expect(res.status).toBe(404);
     });
@@ -107,7 +107,7 @@ describe('comprobantes + flag por estudio', () => {
     it('contador — 404 sin comprobante', async () => {
       sb.queue([{ table: 'comprobantes_pago', result: { data: null, error: null } }]);
       const res = await request(app)
-        .get('/api/impuestos/x/comprobante')
+        .get('/api/impuestos/00000000-0000-4000-8000-000000000000/comprobante')
         .set('Authorization', authA);
       expect(res.status).toBe(404);
     });
@@ -132,7 +132,7 @@ describe('comprobantes + flag por estudio', () => {
   describe('PATCH /api/admin/estudios/:id/comprobantes', () => {
     it('403 si role=contador', async () => {
       const res = await request(app)
-        .patch('/api/admin/estudios/estudio-A/comprobantes')
+        .patch('/api/admin/estudios/00000000-0000-4000-8000-000000000000/comprobantes')
         .set('Authorization', authA)
         .send({ habilitado: true });
       expect(res.status).toBe(403);
@@ -140,7 +140,7 @@ describe('comprobantes + flag por estudio', () => {
 
     it('400 si habilitado no es boolean', async () => {
       const res = await request(app)
-        .patch('/api/admin/estudios/estudio-A/comprobantes')
+        .patch('/api/admin/estudios/00000000-0000-4000-8000-000000000000/comprobantes')
         .set('Authorization', adminAuth)
         .send({ habilitado: 'si' });
       expect(res.status).toBe(400);
@@ -149,7 +149,7 @@ describe('comprobantes + flag por estudio', () => {
     it('404 si el estudio no existe', async () => {
       sb.queue([{ table: 'estudios', result: { data: null, error: null } }]);
       const res = await request(app)
-        .patch('/api/admin/estudios/zzz/comprobantes')
+        .patch('/api/admin/estudios/11111111-1111-4111-8111-111111111111/comprobantes')
         .set('Authorization', adminAuth)
         .send({ habilitado: true });
       expect(res.status).toBe(404);
@@ -165,7 +165,7 @@ describe('comprobantes + flag por estudio', () => {
       };
       sb.queue([{ table: 'estudios', result: { data: updated, error: null } }]);
       const res = await request(app)
-        .patch('/api/admin/estudios/estudio-A/comprobantes')
+        .patch('/api/admin/estudios/00000000-0000-4000-8000-000000000000/comprobantes')
         .set('Authorization', adminAuth)
         .send({ habilitado: true });
       expect(res.status).toBe(200);
