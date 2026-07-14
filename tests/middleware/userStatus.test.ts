@@ -17,22 +17,28 @@ describe('middleware/getEstadoActivo', () => {
     sb.reset();
   });
 
-  it('ok con usuario activo y estudio activo', async () => {
+  it('ok con usuario activo y estudio activo, devuelve condicion_fiscal del row', async () => {
     sb.queue([{
       table: 'users',
-      result: { data: { activo: true, estudio: { activo: true } }, error: null },
+      result: {
+        data: { activo: true, condicion_fiscal: 'responsable_inscripto', estudio: { activo: true } },
+        error: null,
+      },
     }]);
-    expect(await getEstadoActivo(USER_ID)).toEqual({ ok: true });
+    expect(await getEstadoActivo(USER_ID)).toEqual({
+      ok: true,
+      condicion_fiscal: 'responsable_inscripto',
+    });
     expect(sb.calls[0].filters).toContainEqual(['eq', 'id', USER_ID]);
     expect(sb.calls[0].terminal).toBe('maybeSingle');
   });
 
-  it('ok con admin sin estudio (estudio null)', async () => {
+  it('ok con admin sin estudio (estudio null, sin condición)', async () => {
     sb.queue([{
       table: 'users',
-      result: { data: { activo: true, estudio: null }, error: null },
+      result: { data: { activo: true, condicion_fiscal: null, estudio: null }, error: null },
     }]);
-    expect(await getEstadoActivo(USER_ID)).toEqual({ ok: true });
+    expect(await getEstadoActivo(USER_ID)).toEqual({ ok: true, condicion_fiscal: null });
   });
 
   it('usuario_inactivo si activo=false', async () => {

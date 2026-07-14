@@ -49,6 +49,8 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     return;
   }
 
-  req.user = payload;
+  // condicion_fiscal viene de la DB (mismo lookup de revocación), no del token:
+  // puede cambiar durante la sesión y los gates por condición la necesitan fresca.
+  req.user = { ...payload, condicion_fiscal: estado.condicion_fiscal ?? null };
   next();
 }

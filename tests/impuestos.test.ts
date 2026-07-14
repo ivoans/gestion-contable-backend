@@ -1132,6 +1132,66 @@ describe('impuestos', () => {
       });
     });
 
+    it('genera SICOSS y casas particulares para monotributista con los flags (desde 2026-07)', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [
+              {
+                id: 'cli-mono-sicoss',
+                nombre: 'Mono SICOSS',
+                cuit: CUIT_MONO, // termina en 4
+                condicion_fiscal: 'monotributista',
+                convenio_multilateral: false,
+                empleadores_sicoss: true,
+                casas_particulares: true,
+              },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+              { obligacion: 'empleadores_sicoss', terminacion_cuit: 4, fecha_vencimiento: '2026-06-11' },
+              { obligacion: 'casas_particulares', terminacion_cuit: null, fecha_vencimiento: '2026-06-10' },
+            ],
+            error: null,
+          },
+        },
+        {
+          table: 'impuestos',
+          result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }], error: null },
+        },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(4);
+      expect(res.body.obligaciones_sin_fecha).toEqual([]);
+
+      const payload = sb.calls[2].payload as Array<Record<string, unknown>>;
+      expect(payload).toHaveLength(4);
+      expect(payload.find((p) => p.obligacion === 'empleadores_sicoss')).toMatchObject({
+        cliente_id: 'cli-mono-sicoss',
+        tipo: 'Empleadores SICOSS',
+        fecha_vencimiento: '2026-06-11',
+      });
+      expect(payload.find((p) => p.obligacion === 'casas_particulares')).toMatchObject({
+        cliente_id: 'cli-mono-sicoss',
+        tipo: 'Casas Particulares',
+        fecha_vencimiento: '2026-06-10',
+      });
+    });
+
     it('saltea cliente sin condicion_fiscal y con cuit inválido', async () => {
       sb.queue([
         {

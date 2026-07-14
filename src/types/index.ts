@@ -183,4 +183,7 @@ export interface JwtPayload {
   email: string;
   role: Role;
   estudio_id: string | null;
+  // NO viaja en el token: la carga `authenticate` desde la DB (getEstadoActivo)
+  // porque puede cambiar durante la sesión. Undefined fuera de un request.
+  condicion_fiscal?: CondicionFiscal | null;
 }

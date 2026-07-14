@@ -240,27 +240,39 @@ describe('clientes', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
-    it.each([['empleadores_sicoss'], ['casas_particulares']])(
-      '400 si monotributista con %s=true',
-      async (flag) => {
-        const res = await request(app)
-          .post('/api/clientes')
-          .set('Authorization', authA)
-          .send({
-            nombre: 'X',
-            email: 'x@y.com',
-            password: '12345678',
-            condicion_fiscal: 'monotributista',
-            cuit: CUIT_VALIDO,
-            [flag]: true,
-          });
-        expect(res.status).toBe(400);
-        expect(res.body).toEqual({
-          error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
+    it('201 monotributista con sicoss/casas=true (aplican a ambas condiciones desde 2026-07)', async () => {
+      const created = makeUser({
+        role: 'cliente',
+        estudio_id: 'estudio-A',
+        condicion_fiscal: 'monotributista',
+        cuit: CUIT_VALIDO_NORM,
+        empleadores_sicoss: true,
+        casas_particulares: true,
+      });
+      sb.queue([
+        { table: 'users', result: { data: null, error: null } },
+        { table: 'users', result: { data: created, error: null } },
+      ]);
+      bcryptMock.hash.mockResolvedValue('hashed');
+
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'Mono SICOSS',
+          email: 'mono-sicoss@y.com',
+          password: '12345678',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'monotributista',
+          empleadores_sicoss: true,
+          casas_particulares: true,
         });
-        expect(sb.calls).toHaveLength(0);
-      },
-    );
+      expect(res.status).toBe(201);
+      expect(sb.calls[1].payload).toMatchObject({
+        empleadores_sicoss: true,
+        casas_particulares: true,
+      });
+    });
 
     it('201 persiste flags de impuestos opcionales (RI con los tres)', async () => {
       const created = makeUser({
@@ -514,47 +526,24 @@ describe('clientes', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
-    it('400 si queda monotributista con casas_particulares=true en el body', async () => {
+    it('200 monotributista puede marcar casas_particulares (aplica a ambas condiciones desde 2026-07)', async () => {
+      const updated = { ...cliente, condicion_fiscal: 'monotributista', casas_particulares: true };
       sb.queue([
-        {
-          table: 'users',
-          result: {
-            data: {
-              id: cliente.id,
-              condicion_fiscal: 'monotributista',
-              empleadores_sicoss: false,
-              casas_particulares: false,
-            },
-            error: null,
-          },
-        },
+        { table: 'users', result: { data: { id: cliente.id }, error: null } },
+        { table: 'users', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
         .patch(`/api/clientes/${cliente.id}`)
         .set('Authorization', authA)
         .send({ casas_particulares: true });
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual({
-        error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
-      });
-      expect(sb.calls).toHaveLength(1); // solo el find, sin update
+      expect(res.status).toBe(200);
+      expect(sb.calls[1].payload).toEqual({ casas_particulares: true });
     });
 
-    it('200 al pasar a monotributista limpia sicoss/casas guardados (flags no enviados)', async () => {
+    it('200 al pasar a monotributista los flags sicoss/casas se conservan (ya no se limpian)', async () => {
       const updated = { ...cliente, condicion_fiscal: 'monotributista' };
       sb.queue([
-        {
-          table: 'users',
-          result: {
-            data: {
-              id: cliente.id,
-              condicion_fiscal: 'responsable_inscripto',
-              empleadores_sicoss: true,
-              casas_particulares: true,
-            },
-            error: null,
-          },
-        },
+        { table: 'users', result: { data: { id: cliente.id }, error: null } },
         { table: 'users', result: { data: updated, error: null } },
       ]);
       const res = await request(app)
@@ -562,11 +551,7 @@ describe('clientes', () => {
         .set('Authorization', authA)
         .send({ condicion_fiscal: 'monotributista' });
       expect(res.status).toBe(200);
-      expect(sb.calls[1].payload).toEqual({
-        condicion_fiscal: 'monotributista',
-        empleadores_sicoss: false,
-        casas_particulares: false,
-      });
+      expect(sb.calls[1].payload).toEqual({ condicion_fiscal: 'monotributista' });
     });
 
     it('200 actualiza flags opcionales en RI', async () => {
