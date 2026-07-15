@@ -9,7 +9,7 @@ const { sb, emailMock, pushMock } = await vi.hoisted(async () => {
   const { createSupabaseMock } = await import('./helpers/supabaseMock');
   return {
     sb: createSupabaseMock() as SupabaseMock,
-    emailMock: { sendNuevoImpuesto: vi.fn() },
+    emailMock: { sendNuevoImpuesto: vi.fn(), sendGeneracionDigest: vi.fn() },
     pushMock: { sendPushToUser: vi.fn() },
   };
 });
@@ -22,6 +22,7 @@ vi.mock('../src/middleware/userStatus', () => ({
 }));
 vi.mock('../src/services/emailService', () => ({
   sendNuevoImpuesto: emailMock.sendNuevoImpuesto,
+  sendGeneracionDigest: emailMock.sendGeneracionDigest,
 }));
 vi.mock('../src/services/pushService', () => ({
   sendPushToUser: pushMock.sendPushToUser,
@@ -55,6 +56,8 @@ describe('impuestos', () => {
     sb.reset();
     emailMock.sendNuevoImpuesto.mockReset();
     emailMock.sendNuevoImpuesto.mockResolvedValue('enviada');
+    emailMock.sendGeneracionDigest.mockReset();
+    emailMock.sendGeneracionDigest.mockResolvedValue('enviada');
     // Default 'omitida' (sin subs): la fila push queda pendiente sin update.
     pushMock.sendPushToUser.mockReset();
     pushMock.sendPushToUser.mockResolvedValue('omitida');
@@ -891,6 +894,8 @@ describe('impuestos', () => {
           },
         },
         { table: 'impuestos', result: { data: [{ id: 'imp1' }, { id: 'imp2' }], error: null } },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -976,6 +981,8 @@ describe('impuestos', () => {
           },
         },
         { table: 'impuestos', result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }], error: null } },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -1043,6 +1050,8 @@ describe('impuestos', () => {
             error: null,
           },
         },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -1110,6 +1119,8 @@ describe('impuestos', () => {
           table: 'impuestos',
           result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }, { id: 'i5' }], error: null },
         },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -1167,6 +1178,8 @@ describe('impuestos', () => {
           table: 'impuestos',
           result: { data: [{ id: 'i1' }, { id: 'i2' }, { id: 'i3' }, { id: 'i4' }], error: null },
         },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -1261,6 +1274,8 @@ describe('impuestos', () => {
           },
         },
         { table: 'impuestos', result: { data: [{ id: 'i1' }, { id: 'i2' }], error: null } },
+        // Digest post-generación: sin borradores que avisar en este test.
+        { table: 'impuestos', result: { data: [], error: null } },
       ]);
 
       const res = await request(app)
@@ -1309,6 +1324,78 @@ describe('impuestos', () => {
       expect(res.body.ya_existentes).toBe(2);
       expect(sb.calls[2].ignoreDuplicates).toBe(true);
       expect(sb.calls[2].onConflict).toBe('cliente_id, obligacion, periodo');
+    });
+
+    it('tras generar manda UN digest por cliente (email+push) anclado al primer borrador', async () => {
+      sb.queue([
+        {
+          table: 'users',
+          result: {
+            data: [{ id: 'cli-mono', nombre: 'Mono', cuit: CUIT_MONO, condicion_fiscal: 'monotributista' }],
+            error: null,
+          },
+        },
+        {
+          table: 'vencimientos',
+          result: {
+            data: [
+              { obligacion: 'monotributo', terminacion_cuit: null, fecha_vencimiento: '2026-06-20' },
+              { obligacion: 'ingresos_brutos', terminacion_cuit: null, fecha_vencimiento: '2026-06-22' },
+            ],
+            error: null,
+          },
+        },
+        { table: 'impuestos', result: { data: [{ id: 'imp1' }, { id: 'imp2' }], error: null } },
+        // Digest: los borradores del período del cliente, ordenados (imp1 = ancla).
+        {
+          table: 'impuestos',
+          result: {
+            data: [
+              { id: 'imp1', cliente_id: 'cli-mono', tipo: 'Monotributo', cliente: { nombre: 'Mono', email: 'mono@x.com' } },
+              { id: 'imp2', cliente_id: 'cli-mono', tipo: 'Ingresos Brutos', cliente: { nombre: 'Mono', email: 'mono@x.com' } },
+            ],
+            error: null,
+          },
+        },
+        // Entrega email del digest: lookup (no existe) → insert → update (enviada).
+        { table: 'notificaciones', result: { data: null, error: null } },
+        { table: 'notificaciones', result: { data: { id: 'n1' }, error: null } },
+        { table: 'notificaciones', result: { data: null, error: null } },
+        // Entrega push del digest: lookup → insert ('omitida' → queda pendiente).
+        { table: 'notificaciones', result: { data: null, error: null } },
+        { table: 'notificaciones', result: { data: { id: 'n2' }, error: null } },
+      ]);
+
+      const res = await request(app)
+        .post('/api/impuestos/generar')
+        .set('Authorization', authA)
+        .send({ anio: 2026, mes: 6 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.creados).toBe(2);
+
+      // UN solo email digest, con el período en texto y TODAS las obligaciones.
+      expect(emailMock.sendGeneracionDigest).toHaveBeenCalledTimes(1);
+      expect(emailMock.sendGeneracionDigest).toHaveBeenCalledWith('mono@x.com', {
+        nombre: 'Mono',
+        periodo: 'junio 2026',
+        tipos: ['Monotributo', 'Ingresos Brutos'],
+      });
+
+      // La fila de notificación se ancla al primer borrador (imp1), tipo generacion_digest.
+      const inserts = sb.calls.filter((c) => c.table === 'notificaciones' && c.op === 'insert');
+      expect(inserts[0].payload).toMatchObject({
+        impuesto_id: 'imp1',
+        user_id: 'cli-mono',
+        tipo: 'generacion_digest',
+        canal: 'email',
+      });
+
+      // El push del digest también sale (canal aditivo, fila propia).
+      expect(pushMock.sendPushToUser).toHaveBeenCalledWith(
+        'cli-mono',
+        expect.objectContaining({ title: expect.stringContaining('junio 2026') }),
+      );
     });
 
     it('multi-tenant: contador B solo consulta su estudio', async () => {

@@ -1,6 +1,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { procesarVencidos, procesarRecordatorios } from '../jobs/vencimientosCron';
+import {
+  procesarVencidos,
+  procesarRecordatorios,
+  notificarGeneracionDigest,
+} from '../jobs/vencimientosCron';
 import {
   procesarHonorariosVencidos,
   notificarHonorariosNuevos,
@@ -39,6 +43,7 @@ function requireCronSecret(req: Request, res: Response, next: NextFunction): voi
 type Job =
   | 'vencidos'
   | 'recordatorios'
+  | 'generacion_digest'
   | 'honorarios_vencidos'
   | 'honorarios_nuevos'
   | 'honorarios_recordatorios'
@@ -48,6 +53,7 @@ type Job =
 const JOBS: Job[] = [
   'vencidos',
   'recordatorios',
+  'generacion_digest',
   'honorarios_vencidos',
   'honorarios_nuevos',
   'honorarios_recordatorios',
@@ -73,6 +79,10 @@ router.post('/run-cron', requireCronSecret, async (req: Request, res: Response):
     if (target === 'recordatorios' || target === 'all') {
       await procesarRecordatorios();
       ran.push('recordatorios');
+    }
+    if (target === 'generacion_digest' || target === 'all') {
+      await notificarGeneracionDigest();
+      ran.push('generacion_digest');
     }
     // Generación mensual: idempotente, seguro correrla en cada 'all' (solo crea el mes actual una vez).
     if (target === 'honorarios_generar' || target === 'all') {

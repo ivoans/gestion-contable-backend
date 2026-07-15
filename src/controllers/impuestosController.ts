@@ -4,6 +4,7 @@ import { Impuesto, EstadoImpuesto, Obligacion, CondicionFiscal } from '../types'
 import { sendNuevoImpuesto } from '../services/emailService';
 import { sendPushToUser } from '../services/pushService';
 import { entregarNotificacion } from '../services/notificacionesService';
+import { notificarGeneracionDigest } from '../jobs/vencimientosCron';
 import { isValidCuit, normalizeCuit, isValidUuid } from '../utils/validators';
 import { formatFechaCorta } from '../utils/fechas';
 
@@ -750,6 +751,16 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
       }
 
       creados = insertData.length;
+    }
+
+    // Digest inmediato al cliente de lo generado (email + push, un aviso por cliente).
+    // El job diario lo reintenta; un fallo acá nunca voltea la generación (ya guardada).
+    if (creados > 0) {
+      try {
+        await notificarGeneracionDigest(periodo);
+      } catch (err) {
+        console.error('[impuestos] Digest de generación falló (impuestos guardados OK):', err);
+      }
     }
 
     res.json({

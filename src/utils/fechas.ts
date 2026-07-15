@@ -22,3 +22,14 @@ export function formatFechaCorta(fecha: string): string {
   const [y, m, d] = fecha.split('-');
   return `${d}/${m}/${y}`;
 }
+
+const MESES_LARGO = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+];
+
+/** "julio 2026" para textos de avisos, desde un período YYYY-MM-DD. */
+export function formatPeriodoLargo(periodo: string): string {
+  const [y, m] = periodo.split('-');
+  return `${MESES_LARGO[Number(m) - 1]} ${y}`;
+}

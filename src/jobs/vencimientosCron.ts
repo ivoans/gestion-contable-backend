@@ -1,9 +1,20 @@
 import cron from 'node-cron';
 import { supabase } from '../lib/supabase';
-import { sendVencido, sendVencidoCliente, sendRecordatorio } from '../services/emailService';
+import {
+  sendVencido,
+  sendVencidoCliente,
+  sendRecordatorio,
+  sendGeneracionDigest,
+} from '../services/emailService';
 import { sendPushToUser } from '../services/pushService';
 import { entregarNotificacion } from '../services/notificacionesService';
-import { getDateAR, addDays, formatFechaCorta } from '../utils/fechas';
+import {
+  getDateAR,
+  addDays,
+  formatFechaCorta,
+  primerDiaMesAR,
+  formatPeriodoLargo,
+} from '../utils/fechas';
 
 type ImpuestoVencido = {
   id: string;
@@ -194,6 +205,105 @@ export async function procesarRecordatorios(): Promise<void> {
   console.log(`[cron:recordatorios] Enviados ${enviados}, fallidos ${fallidos}, total ${proximos.length}. END ${new Date().toISOString()}`);
 }
 
+type ImpuestoBorradorDigest = {
+  id: string;
+  cliente_id: string;
+  tipo: string;
+  cliente: { nombre: string; email: string } | null;
+};
+
+// Aviso DIGEST al CLIENTE cuando se le generan sus obligaciones del período: UN solo
+// email + push por cliente listando todo lo generado, en vez de N avisos de una (pedido
+// de la contadora: avisar al generar; el monto de cada impuesto llega después con el
+// aviso 'nuevo' de borrador → pendiente).
+//
+// La tabla notificaciones exige un target impuesto/honorario, así que el digest se ancla
+// al borrador MÁS ANTIGUO del cliente en el período (orden created_at, id): esa fila no
+// cambia cuando se agregan obligaciones después, y el dedup (target, tipo, canal) da un
+// solo digest por (cliente, período). Corre tras la generación (aviso inmediato) y a
+// diario (reintento gratis de 'pendiente'/'fallida' por el dedup).
+export async function notificarGeneracionDigest(periodo?: string): Promise<void> {
+  const periodoDigest = periodo ?? primerDiaMesAR();
+  console.log(`[cron:generacion-digest] START ${periodoDigest}`);
+
+  const { data, error } = await supabase
+    .from('impuestos')
+    .select('id, cliente_id, tipo, cliente:users!cliente_id(nombre, email)')
+    .eq('estado', 'borrador')
+    .eq('periodo', periodoDigest)
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true });
+
+  if (error) {
+    console.error('[cron:generacion-digest] Error buscando borradores:', error.message);
+    return;
+  }
+
+  const filas = (data ?? []) as unknown as ImpuestoBorradorDigest[];
+  if (filas.length === 0) {
+    console.log('[cron:generacion-digest] Sin borradores del período. END');
+    return;
+  }
+
+  // Agrupar por cliente preservando el orden: la primera fila del grupo es el ancla.
+  const porCliente = new Map<string, ImpuestoBorradorDigest[]>();
+  for (const fila of filas) {
+    const grupo = porCliente.get(fila.cliente_id);
+    if (grupo) grupo.push(fila);
+    else porCliente.set(fila.cliente_id, [fila]);
+  }
+
+  let enviados = 0;
+  let fallidos = 0;
+  const contar = (resultado: string) => {
+    if (resultado === 'enviada') enviados++;
+    else if (resultado === 'fallida') fallidos++;
+  };
+
+  const periodoLabel = formatPeriodoLargo(periodoDigest);
+
+  for (const [cliente_id, grupo] of porCliente) {
+    const ancla = grupo[0];
+    const tipos = grupo.map((g) => g.tipo);
+
+    const emailCliente = ancla.cliente?.email;
+    if (emailCliente) {
+      contar(
+        await entregarNotificacion({
+          target: { impuesto_id: ancla.id },
+          user_id: cliente_id,
+          tipo: 'generacion_digest',
+          enviar: () =>
+            sendGeneracionDigest(emailCliente, {
+              nombre: ancla.cliente?.nombre ?? '',
+              periodo: periodoLabel,
+              tipos,
+            }),
+        }),
+      );
+    } else {
+      console.error(`[cron:generacion-digest] Cliente ${cliente_id} sin email; se omite el digest por email.`);
+    }
+
+    contar(
+      await entregarNotificacion({
+        target: { impuesto_id: ancla.id },
+        user_id: cliente_id,
+        tipo: 'generacion_digest',
+        canal: 'push',
+        enviar: () =>
+          sendPushToUser(cliente_id, {
+            title: `Se generaron tus obligaciones de ${periodoLabel}`,
+            body: `${tipos.join(', ')}. Tu contadora va a confirmar los montos.`,
+            url: '/cliente',
+          }),
+      }),
+    );
+  }
+
+  console.log(`[cron:generacion-digest] Enviados ${enviados}, fallidos ${fallidos}, clientes ${porCliente.size}. END`);
+}
+
 export async function runVencimientosCron(): Promise<void> {
   await procesarVencidos();
 }
@@ -215,5 +325,15 @@ export function initCronJobs(): void {
     }
   }, { timezone: 'America/Argentina/Buenos_Aires' });
 
-  console.log('[cron] Jobs inicializados — vencidos + recordatorios @ 08:00 ART');
+  // Reintento del digest de generación (el aviso inmediato sale al generar; esto
+  // barre los 'pendiente'/'fallida', p. ej. canal apagado o Resend caído).
+  cron.schedule('0 8 * * *', async () => {
+    try {
+      await notificarGeneracionDigest();
+    } catch (err) {
+      console.error('[cron:generacion-digest] Error inesperado:', err);
+    }
+  }, { timezone: 'America/Argentina/Buenos_Aires' });
+
+  console.log('[cron] Jobs inicializados — vencidos + recordatorios + generacion-digest @ 08:00 ART');
 }
