@@ -509,3 +509,30 @@ CREATE TRIGGER trg_monotributo_escala_updated_at
 CREATE TRIGGER trg_monotributo_facturacion_updated_at
   BEFORE UPDATE ON monotributo_facturacion
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ============================================================
+-- SUELDOS (migración 015) — recibos de sueldo por cliente (módulo referencial).
+-- La contadora los carga (período + monto + empleado + PDF opcional); el cliente
+-- los ve en solo lectura. Habilitado para clientes con empleadores_sicoss / casas
+-- particulares. El PDF vive en el bucket 'comprobantes' (path <estudio>/sueldos/...).
+-- ============================================================
+CREATE TABLE sueldos (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  empleado      TEXT NOT NULL,
+  periodo       DATE NOT NULL,
+  monto         DECIMAL(15, 2) NOT NULL CHECK (monto >= 0),
+  storage_path  TEXT,
+  mime          TEXT,
+  size_bytes    INTEGER,
+  original_name TEXT,
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_sueldos_estudio_cliente_periodo ON sueldos (estudio_id, cliente_id, periodo);
+
+CREATE TRIGGER trg_sueldos_updated_at
+  BEFORE UPDATE ON sueldos
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();

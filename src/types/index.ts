@@ -212,6 +212,23 @@ export interface Notificacion {
   enviada_at: string;
 }
 
+// Recibo de sueldo cargado por la contadora (módulo referencial, E3 / migración 015).
+// El cliente lo ve en solo lectura. El PDF (opcional) vive en Storage; acá la metadata.
+export interface Sueldo {
+  id: string;
+  estudio_id: string;
+  cliente_id: string;
+  empleado: string;
+  periodo: string; // YYYY-MM-DD (primer día del mes)
+  monto: number;
+  storage_path: string | null;
+  mime: string | null;
+  size_bytes: number | null;
+  original_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface JwtPayload {
   id: string;
   email: string;
