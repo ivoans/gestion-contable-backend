@@ -28,6 +28,17 @@ CREATE TABLE estudios (
   nombre                   VARCHAR(255) NOT NULL,
   activo                   BOOLEAN NOT NULL DEFAULT true,
   comprobantes_habilitados BOOLEAN NOT NULL DEFAULT false,
+  -- Identidad fiscal para el encabezado del recibo de cobranza (migración 014).
+  domicilio                TEXT,
+  cuit                     VARCHAR(13),
+  telefono                 VARCHAR(30),
+  email                    VARCHAR(255),
+  condicion_iva            TEXT,          -- texto libre, ej. 'MONOTRIBUTO'
+  inicio_actividades       DATE,
+  logo_path                TEXT,          -- objeto en el bucket 'comprobantes'
+  -- Numeración correlativa de recibos por estudio (ver next_numero_recibo()).
+  recibo_punto_venta       SMALLINT NOT NULL DEFAULT 1,
+  recibo_proximo_numero    INTEGER  NOT NULL DEFAULT 1,
   created_at               TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
@@ -44,6 +55,7 @@ CREATE TABLE users (
   role          role NOT NULL,
   cuit          VARCHAR(13),
   telefono      VARCHAR(20),
+  domicilio     TEXT,                 -- para el recibo de cobranza (migración 014)
   condicion_fiscal condicion_fiscal,  -- NULL: admin/contador o cliente sin clasificar
   categoria     VARCHAR,              -- letra del monotributo, solo referencia
   activo        BOOLEAN NOT NULL DEFAULT true,
@@ -122,7 +134,9 @@ CREATE TABLE honorarios (
   estudio_id        UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
   cliente_id        UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   creado_por        UUID REFERENCES users(id) ON DELETE RESTRICT,  -- NULL = generado por cron
-  periodo           DATE NOT NULL,            -- primer día del mes
+  -- Primer día del mes facturado. NULL = honorario SUELTO (sin plan, migración 014);
+  -- el UNIQUE de abajo no aplica a NULL, así que los sueltos no chocan con el abono.
+  periodo           DATE,
   monto             DECIMAL(12, 2) NOT NULL CHECK (monto > 0),
   fecha_vencimiento DATE NOT NULL,
   descripcion       TEXT,
@@ -180,6 +194,46 @@ CREATE UNIQUE INDEX uq_comprobante_por_honorario
   ON comprobantes_pago (honorario_id) WHERE honorario_id IS NOT NULL;
 CREATE INDEX idx_comprobantes_impuesto ON comprobantes_pago (impuesto_id);
 CREATE INDEX idx_comprobantes_honorario ON comprobantes_pago (honorario_id);
+
+-- ============================================================
+-- TABLA: recibos (recibo de cobranza de honorarios)
+-- ============================================================
+-- Emitido al confirmar el cobro de un honorario (réplica del recibo X de Alegra).
+-- El PDF vive en Storage (bucket 'comprobantes', <estudio>/recibos/...). Numeración
+-- correlativa por estudio vía next_numero_recibo(). Ver migración 014.
+
+CREATE TABLE recibos (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id    UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  honorario_id  UUID NOT NULL REFERENCES honorarios(id) ON DELETE CASCADE,
+  cliente_id    UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  emitido_por   UUID REFERENCES users(id) ON DELETE RESTRICT,
+  punto_venta   SMALLINT NOT NULL,
+  numero        INTEGER NOT NULL,
+  fecha         DATE NOT NULL,
+  metodo_pago   TEXT NOT NULL,
+  concepto      TEXT NOT NULL,
+  monto         DECIMAL(12, 2) NOT NULL,
+  storage_path  TEXT NOT NULL,
+  created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+
+  -- Un recibo por honorario; revertir el cobro borra el recibo.
+  CONSTRAINT uq_recibo_por_honorario UNIQUE (honorario_id),
+  CONSTRAINT uq_recibo_numero UNIQUE (estudio_id, punto_venta, numero)
+);
+
+CREATE INDEX idx_recibos_estudio ON recibos (estudio_id);
+CREATE INDEX idx_recibos_cliente ON recibos (cliente_id);
+
+-- Numeración atómica por estudio. Si el insert posterior del recibo falla queda un
+-- hueco en la numeración; aceptado.
+CREATE FUNCTION next_numero_recibo(p_estudio_id UUID) RETURNS INTEGER
+LANGUAGE sql AS $$
+  UPDATE estudios
+  SET recibo_proximo_numero = recibo_proximo_numero + 1
+  WHERE id = p_estudio_id
+  RETURNING recibo_proximo_numero - 1;
+$$;
 
 -- ============================================================
 -- TABLA: vencimientos (calendario que carga la contadora)

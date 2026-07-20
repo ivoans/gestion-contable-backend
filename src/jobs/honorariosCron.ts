@@ -8,7 +8,7 @@ import {
 } from '../services/emailService';
 import { sendPushToUser } from '../services/pushService';
 import { entregarNotificacion } from '../services/notificacionesService';
-import { getDateAR, addDays, primerDiaMesAR, formatFechaCorta } from '../utils/fechas';
+import { getDateAR, addDays, periodoAnteriorAR, formatFechaCorta } from '../utils/fechas';
 
 type HonorarioAviso = {
   id: string;
@@ -102,20 +102,22 @@ export async function procesarHonorariosVencidos(): Promise<void> {
   console.log(`[cron:honorarios-vencidos] Enviados ${enviados}, fallidos ${fallidos}, total ${vencidos?.length ?? 0}. END`);
 }
 
-// Avisa al CLIENTE (email + push) los honorarios del mes actual que siguen pendientes.
+// Avisa al CLIENTE (email + push) los honorarios pendientes del período en curso de
+// cobro (el mes anterior, por mes vencido) y los SUELTOS (periodo NULL).
 // Corre a diario: el dedup hace que cada aviso salga una sola vez, y las corridas
 // siguientes reintentan gratis los 'pendiente'/'fallida' (p. ej. cliente que se
 // suscribió a push después de la generación). También cubre los honorarios creados
 // fuera del cron (alta de plan a mitad de mes).
 export async function notificarHonorariosNuevos(): Promise<void> {
-  const periodo = primerDiaMesAR();
+  const { anio, mes } = periodoAnteriorAR();
+  const periodo = `${anio}-${String(mes).padStart(2, '0')}-01`;
   console.log(`[cron:honorarios-nuevos] START ${periodo}`);
 
   const { data: nuevos, error } = await supabase
     .from('honorarios')
     .select(SELECT_AVISO)
     .eq('estado', 'pendiente')
-    .eq('periodo', periodo);
+    .or(`periodo.eq.${periodo},periodo.is.null`);
 
   if (error) {
     console.error('[cron:honorarios-nuevos] Error buscando honorarios del período:', error.message);
@@ -232,13 +234,12 @@ export async function procesarHonorariosRecordatorios(): Promise<void> {
   console.log(`[cron:honorarios-recordatorios] Enviados ${enviados}, fallidos ${fallidos}, total ${proximos?.length ?? 0}. END`);
 }
 
-// Genera los honorarios del mes actual para TODOS los estudios (a partir de los planes
-// activos). Idempotente: re-correr el mismo mes no duplica.
-export async function generarHonorariosMesActual(): Promise<void> {
-  const now = new Date();
-  const anio = now.getFullYear();
-  const mes = now.getMonth() + 1;
-  console.log(`[cron:honorarios-generar] START ${anio}-${mes}`);
+// Genera los honorarios del período ANTERIOR (mes vencido) para TODOS los estudios, a
+// partir de los planes activos: el 1/7 se genera "junio", que vence en julio.
+// Idempotente: re-correr el mismo mes no duplica.
+export async function generarHonorariosMesVencido(): Promise<void> {
+  const { anio, mes } = periodoAnteriorAR();
+  console.log(`[cron:honorarios-generar] START periodo=${anio}-${mes} (mes vencido)`);
 
   const result = await generarHonorarios({ anio, mes, creado_por: null });
   if ('error' in result) {
@@ -253,10 +254,10 @@ export async function generarHonorariosMesActual(): Promise<void> {
 }
 
 export function initHonorariosJobs(): void {
-  // Generación: día 1 de cada mes a las 08:00 ART.
+  // Generación: día 1 de cada mes a las 08:00 ART (genera el período anterior).
   cron.schedule('0 8 1 * *', async () => {
     try {
-      await generarHonorariosMesActual();
+      await generarHonorariosMesVencido();
     } catch (err) {
       console.error('[cron:honorarios-generar] Error inesperado:', err);
     }

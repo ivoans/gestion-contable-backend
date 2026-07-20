@@ -113,7 +113,7 @@ describe('cron · procesarHonorariosVencidos', () => {
 });
 
 describe('cron · notificarHonorariosNuevos', () => {
-  it('avisa los pendientes del período actual por email + push', async () => {
+  it('avisa los pendientes del período en cobro (mes anterior) y los sueltos, por email + push', async () => {
     sendNuevoHonorario.mockResolvedValue('enviada');
     sendPushToUser.mockResolvedValue('enviada');
     sb.queue([
@@ -128,10 +128,12 @@ describe('cron · notificarHonorariosNuevos', () => {
 
     await notificarHonorariosNuevos();
 
-    // Filtra por período del mes actual (primer día) y estado pendiente.
+    // Filtra pendientes del período en cobro (mes vencido: el mes anterior, primer
+    // día) e incluye los sueltos (periodo null) en el mismo .or().
     expect(sb.calls[0].filters).toContainEqual(['eq', 'estado', 'pendiente']);
-    expect(sb.calls[0].filters.some(([op, campo, val]) =>
-      op === 'eq' && campo === 'periodo' && typeof val === 'string' && val.endsWith('-01'),
+    expect(sb.calls[0].filters.some(([op, expr]) =>
+      op === 'or' && typeof expr === 'string' &&
+      expr.includes('periodo.is.null') && /periodo\.eq\.\d{4}-\d{2}-01/.test(expr),
     )).toBe(true);
 
     expect(sendNuevoHonorario).toHaveBeenCalledWith('cliente@mail.com', {

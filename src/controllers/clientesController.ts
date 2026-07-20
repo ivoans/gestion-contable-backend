@@ -5,7 +5,7 @@ import { CondicionFiscal, User } from '../types';
 import { isValidCuit, isValidEmail, normalizeCuit } from '../utils/validators';
 
 const USER_FIELDS =
-  'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, convenio_multilateral, empleadores_sicoss, casas_particulares, telefono, activo, created_at';
+  'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, convenio_multilateral, empleadores_sicoss, casas_particulares, telefono, domicilio, activo, created_at';
 
 const CONDICIONES_FISCALES: readonly CondicionFiscal[] = ['monotributista', 'responsable_inscripto'];
 
@@ -44,7 +44,7 @@ function validarFlagsOpcionales(
 }
 
 export async function crearCliente(req: Request, res: Response): Promise<void> {
-  const { nombre, email, password, cuit, condicion_fiscal, categoria, telefono } = req.body as {
+  const { nombre, email, password, cuit, condicion_fiscal, categoria, telefono, domicilio } = req.body as {
     nombre?: string;
     email?: string;
     password?: string;
@@ -52,6 +52,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     condicion_fiscal?: string;
     categoria?: string | null;
     telefono?: string;
+    domicilio?: string;
   };
 
   if (!nombre || !email || !password) {
@@ -118,6 +119,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
         categoria: categoria ?? null,
         ...flagsResult.flags,
         telefono: telefono ?? null,
+        domicilio: domicilio ?? null,
         role: 'cliente',
         estudio_id,
         activo: true,
@@ -190,13 +192,14 @@ export async function obtenerCliente(req: Request, res: Response): Promise<void>
 export async function actualizarCliente(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const estudio_id = req.user!.estudio_id;
-  const { nombre, email, cuit, condicion_fiscal, categoria, telefono } = req.body as {
+  const { nombre, email, cuit, condicion_fiscal, categoria, telefono, domicilio } = req.body as {
     nombre?: string;
     email?: string;
     cuit?: string;
     condicion_fiscal?: string;
     categoria?: string | null;
     telefono?: string;
+    domicilio?: string;
   };
 
   if (email !== undefined && !isValidEmail(email)) {
@@ -235,6 +238,7 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
   if (condicion_fiscal !== undefined) updates.condicion_fiscal = condicion_fiscal;
   if (categoria !== undefined) updates.categoria = categoria;
   if (telefono !== undefined) updates.telefono = telefono;
+  if (domicilio !== undefined) updates.domicilio = domicilio;
   for (const key of FLAG_KEYS) {
     if (bodyRaw[key] !== undefined) updates[key] = bodyRaw[key];
   }

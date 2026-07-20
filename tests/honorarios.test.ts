@@ -117,6 +117,40 @@ describe('Honorarios — contador', () => {
     const upsertCall = sb.calls.find((c) => c.op === 'upsert');
     expect(upsertCall?.onConflict).toBe('cliente_id, periodo');
     expect(upsertCall?.ignoreDuplicates).toBe(true);
+    // MES VENCIDO: el período junio vence en JULIO (día del plan) y la descripción
+    // nombra el mes facturado.
+    const rows = upsertCall?.payload as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({
+      periodo: '2026-06-01',
+      fecha_vencimiento: '2026-07-10',
+      descripcion: 'Honorarios Junio 2026',
+    });
+    expect(rows[1]).toMatchObject({ periodo: '2026-06-01', fecha_vencimiento: '2026-07-05' });
+  });
+
+  it('POST /api/honorarios/generar con período diciembre vence en enero del año siguiente', async () => {
+    sb.queue([
+      {
+        table: 'honorarios_plan',
+        result: {
+          data: [
+            { cliente_id: 'c1', estudio_id: 'estudio-1', monto: 50000, dia_vencimiento: 10, cliente: { activo: true } },
+          ],
+          error: null,
+        },
+      },
+      { table: 'honorarios', result: { data: [{ id: 'h1' }], error: null } },
+      { table: 'honorarios', result: { data: [], error: null } },
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios/generar')
+      .set('Authorization', authC())
+      .send({ anio: 2026, mes: 12 });
+
+    expect(res.status).toBe(200);
+    const upsertCall = sb.calls.find((c) => c.op === 'upsert');
+    const rows = upsertCall?.payload as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ periodo: '2026-12-01', fecha_vencimiento: '2027-01-10' });
   });
 
   it('POST /api/honorarios/generar revive un honorario anulado del período', async () => {
@@ -216,6 +250,158 @@ describe('Honorarios — contador', () => {
 });
 
 // B6: un id/cliente_id no-UUID se corta con 400 antes de tocar la DB (PostgREST 22P02 → 500).
+describe('Honorarios — creación manual (E8: sueltos + retroactivos)', () => {
+  let app: ReturnType<typeof createApp>;
+  beforeEach(() => {
+    sb.reset();
+    app = createApp();
+  });
+
+  // El aviso inmediato (email+push tipo 'nuevo') corre con los canales apagados en
+  // tests → entregarNotificacion hace lookup + insert por canal y queda 'pendiente'.
+  const avisoCalls = () => [
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'n-email' }, error: null } },
+    { table: 'notificaciones', result: { data: null, error: null } },
+    { table: 'notificaciones', result: { data: { id: 'n-push' }, error: null } },
+  ];
+
+  it('POST /api/honorarios crea un suelto (periodo null) y despacha el aviso', async () => {
+    const creado = makeHonorario({ periodo: null, descripcion: 'Manifestación de bienes', fecha_vencimiento: '2030-01-15' });
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, nombre: 'Juan', email: 'j@test.local' }, error: null } },
+      { table: 'honorarios', resultSingle: { data: creado, error: null }, result: { data: null, error: null } },
+      ...avisoCalls(),
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, monto: 80000, fecha_vencimiento: '2030-01-15', descripcion: 'Manifestación de bienes' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.periodo).toBeNull();
+
+    const insHon = sb.calls.find((c) => c.table === 'honorarios' && c.op === 'insert');
+    expect(insHon?.payload).toMatchObject({
+      periodo: null,
+      monto: 80000,
+      descripcion: 'Manifestación de bienes',
+      estado: 'pendiente',
+      creado_por: contador.id,
+    });
+    const insNotif = sb.calls.find((c) => c.table === 'notificaciones' && c.op === 'insert');
+    expect(insNotif?.payload).toMatchObject({ honorario_id: creado.id, tipo: 'nuevo' });
+  });
+
+  it('POST /api/honorarios con vencimiento pasado entra directo como vencido', async () => {
+    const creado = makeHonorario({ periodo: null, fecha_vencimiento: '2020-01-15', estado: 'vencido' });
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, nombre: 'Juan', email: 'j@test.local' }, error: null } },
+      { table: 'honorarios', resultSingle: { data: creado, error: null }, result: { data: null, error: null } },
+      ...avisoCalls(),
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, monto: 80000, fecha_vencimiento: '2020-01-15', descripcion: 'Deuda vieja' });
+
+    expect(res.status).toBe(201);
+    const insHon = sb.calls.find((c) => c.table === 'honorarios' && c.op === 'insert');
+    expect(insHon?.payload).toMatchObject({ estado: 'vencido' });
+  });
+
+  it('POST /api/honorarios 400 sin descripcion (es lo que ve el cliente)', async () => {
+    const res = await request(app)
+      .post('/api/honorarios')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, monto: 80000, fecha_vencimiento: '2030-01-15' });
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('POST /api/honorarios 404 si el cliente no es del estudio', async () => {
+    sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+    const res = await request(app)
+      .post('/api/honorarios')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, monto: 80000, fecha_vencimiento: '2030-01-15', descripcion: 'x' });
+    expect(res.status).toBe(404);
+  });
+
+  it('POST /api/honorarios/retroactivos crea un honorario por mes del rango (cruza año)', async () => {
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, nombre: 'Juan', email: 'j@test.local' }, error: null } },
+      { table: 'honorarios', result: { data: [{ id: 'h1' }, { id: 'h2' }, { id: 'h3' }, { id: 'h4' }], error: null } },
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios/retroactivos')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, desde: '2020-11', hasta: '2021-02', monto: 50000, dia_vencimiento: 10 });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ creados: 4, ya_existentes: 0 });
+
+    const upsert = sb.calls.find((c) => c.op === 'upsert');
+    expect(upsert?.onConflict).toBe('cliente_id, periodo');
+    expect(upsert?.ignoreDuplicates).toBe(true);
+    const rows = upsert?.payload as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(4);
+    // Mes vencido + rollover de año + deuda pasada entra como vencida.
+    expect(rows[0]).toMatchObject({ periodo: '2020-11-01', fecha_vencimiento: '2020-12-10', estado: 'vencido' });
+    expect(rows[3]).toMatchObject({
+      periodo: '2021-02-01',
+      fecha_vencimiento: '2021-03-10',
+      descripcion: 'Honorarios Febrero 2021',
+      estado: 'vencido',
+    });
+  });
+
+  it('POST /api/honorarios/retroactivos con meses futuros los deja pendientes', async () => {
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, nombre: 'Juan', email: 'j@test.local' }, error: null } },
+      { table: 'honorarios', result: { data: [{ id: 'h1' }], error: null } },
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios/retroactivos')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, desde: '2030-01', hasta: '2030-01', monto: 50000 });
+
+    expect(res.status).toBe(201);
+    const rows = sb.calls.find((c) => c.op === 'upsert')?.payload as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ periodo: '2030-01-01', estado: 'pendiente' });
+  });
+
+  it('POST /api/honorarios/retroactivos reporta los que ya existían (idempotente)', async () => {
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, nombre: 'Juan', email: 'j@test.local' }, error: null } },
+      // Solo 1 de 3 meses se insertó; los otros 2 ya existían.
+      { table: 'honorarios', result: { data: [{ id: 'h1' }], error: null } },
+    ]);
+    const res = await request(app)
+      .post('/api/honorarios/retroactivos')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, desde: '2026-01', hasta: '2026-03', monto: 50000 });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ creados: 1, ya_existentes: 2 });
+  });
+
+  it('POST /api/honorarios/retroactivos 400 si desde > hasta o el rango supera 36 meses', async () => {
+    const r1 = await request(app)
+      .post('/api/honorarios/retroactivos')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, desde: '2026-05', hasta: '2026-01', monto: 50000 });
+    expect(r1.status).toBe(400);
+
+    const r2 = await request(app)
+      .post('/api/honorarios/retroactivos')
+      .set('Authorization', authC())
+      .send({ cliente_id: cliente.id, desde: '2020-01', hasta: '2026-01', monto: 50000 });
+    expect(r2.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+});
+
 describe('Honorarios — validación UUID (B6)', () => {
   let app: ReturnType<typeof createApp>;
   beforeEach(() => {

@@ -30,6 +30,7 @@ export interface User {
   empleadores_sicoss: boolean;
   casas_particulares: boolean;
   telefono: string | null;
+  domicilio: string | null;
   activo: boolean;
   created_at: string;
 }
@@ -38,6 +39,16 @@ export interface Estudio {
   id: string;
   nombre: string;
   activo: boolean;
+  // Identidad fiscal para el recibo de cobranza (migración 014).
+  domicilio: string | null;
+  cuit: string | null;
+  telefono: string | null;
+  email: string | null;
+  condicion_iva: string | null;
+  inicio_actividades: string | null;
+  logo_path: string | null;
+  recibo_punto_venta: number;
+  recibo_proximo_numero: number;
   created_at: string;
 }
 
@@ -74,12 +85,13 @@ export interface HonorarioPlan {
 }
 
 // Instancia mensual del honorario (generada del plan o creada a mano).
+// periodo NULL = honorario SUELTO (sin plan, con descripcion obligatoria).
 export interface Honorario {
   id: string;
   estudio_id: string;
   cliente_id: string;
   creado_por: string | null;
-  periodo: string;
+  periodo: string | null;
   monto: number;
   fecha_vencimiento: string;
   descripcion: string | null;
@@ -88,6 +100,23 @@ export interface Honorario {
   pagado_por: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// Recibo de cobranza emitido al confirmar el cobro de un honorario (migración 014).
+export interface Recibo {
+  id: string;
+  estudio_id: string;
+  honorario_id: string;
+  cliente_id: string;
+  emitido_por: string | null;
+  punto_venta: number;
+  numero: number;
+  fecha: string;
+  metodo_pago: string;
+  concepto: string;
+  monto: number;
+  storage_path: string;
+  created_at: string;
 }
 
 export interface Vencimiento {

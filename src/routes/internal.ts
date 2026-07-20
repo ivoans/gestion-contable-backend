@@ -9,7 +9,7 @@ import {
   procesarHonorariosVencidos,
   notificarHonorariosNuevos,
   procesarHonorariosRecordatorios,
-  generarHonorariosMesActual,
+  generarHonorariosMesVencido,
 } from '../jobs/honorariosCron';
 
 const router = Router();
@@ -84,9 +84,9 @@ router.post('/run-cron', requireCronSecret, async (req: Request, res: Response):
       await notificarGeneracionDigest();
       ran.push('generacion_digest');
     }
-    // Generación mensual: idempotente, seguro correrla en cada 'all' (solo crea el mes actual una vez).
+    // Generación mensual (mes vencido): idempotente, seguro correrla en cada 'all'.
     if (target === 'honorarios_generar' || target === 'all') {
-      await generarHonorariosMesActual();
+      await generarHonorariosMesVencido();
       ran.push('honorarios_generar');
     }
     if (target === 'honorarios_vencidos' || target === 'all') {
