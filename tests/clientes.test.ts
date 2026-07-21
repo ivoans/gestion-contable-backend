@@ -223,6 +223,31 @@ describe('clientes', () => {
       expect(insertCall.payload).not.toHaveProperty('password');
     });
 
+    it('normaliza el email (trim + lowercase) en el chequeo de duplicado y en el insert', async () => {
+      const created = makeUser({ role: 'cliente', estudio_id: 'estudio-A' });
+      sb.queue([
+        { table: 'users', result: { data: null, error: null } },
+        { table: 'users', result: { data: created, error: null } },
+      ]);
+      bcryptMock.hash.mockResolvedValue('hashed');
+
+      const res = await request(app)
+        .post('/api/clientes')
+        .set('Authorization', authA)
+        .send({
+          nombre: 'Cliente Nuevo',
+          email: '  Nuevo@Ejemplo.COM  ',
+          password: '12345678',
+          cuit: CUIT_VALIDO,
+          condicion_fiscal: 'monotributista',
+        });
+      expect(res.status).toBe(201);
+      // Chequeo de duplicado consulta con el email normalizado.
+      expect(sb.calls[0].filters).toContainEqual(['eq', 'email', 'nuevo@ejemplo.com']);
+      // Y se persiste normalizado.
+      expect(sb.calls[1].payload).toMatchObject({ email: 'nuevo@ejemplo.com' });
+    });
+
     it('400 si flag opcional no booleano', async () => {
       const res = await request(app)
         .post('/api/clientes')

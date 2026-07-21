@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { CondicionFiscal, User } from '../types';
-import { isValidCuit, isValidEmail, normalizeCuit } from '../utils/validators';
+import { isValidCuit, isValidEmail, normalizeCuit, normalizeEmail } from '../utils/validators';
 
 const USER_FIELDS =
   'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, convenio_multilateral, empleadores_sicoss, casas_particulares, telefono, domicilio, activo, created_at';
@@ -60,7 +60,9 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!isValidEmail(email)) {
+  const emailNormalizado = normalizeEmail(email);
+
+  if (!isValidEmail(emailNormalizado)) {
     res.status(400).json({ error: 'Email inválido' });
     return;
   }
@@ -93,7 +95,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     const { data: existing, error: checkError } = await supabase
       .from('users')
       .select('id')
-      .eq('email', email)
+      .eq('email', emailNormalizado)
       .maybeSingle();
 
     if (checkError) {
@@ -112,7 +114,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
       .from('users')
       .insert({
         nombre,
-        email,
+        email: emailNormalizado,
         password_hash,
         cuit: cuitNormalizado,
         condicion_fiscal,
@@ -202,9 +204,13 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
     domicilio?: string;
   };
 
-  if (email !== undefined && !isValidEmail(email)) {
-    res.status(400).json({ error: 'Email inválido' });
-    return;
+  let emailNormalizado: string | undefined;
+  if (email !== undefined) {
+    emailNormalizado = normalizeEmail(email);
+    if (!isValidEmail(emailNormalizado)) {
+      res.status(400).json({ error: 'Email inválido' });
+      return;
+    }
   }
 
   if (condicion_fiscal !== undefined && !isValidCondicionFiscal(condicion_fiscal)) {
@@ -233,7 +239,7 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
 
   const updates: Partial<Record<string, unknown>> = {};
   if (nombre !== undefined) updates.nombre = nombre;
-  if (email !== undefined) updates.email = email;
+  if (email !== undefined) updates.email = emailNormalizado;
   if (cuit !== undefined) updates.cuit = cuitNormalizado;
   if (condicion_fiscal !== undefined) updates.condicion_fiscal = condicion_fiscal;
   if (categoria !== undefined) updates.categoria = categoria;
@@ -267,11 +273,11 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
       return;
     }
 
-    if (email) {
+    if (emailNormalizado) {
       const { data: emailTaken, error: emailError } = await supabase
         .from('users')
         .select('id')
-        .eq('email', email)
+        .eq('email', emailNormalizado)
         .neq('id', id)
         .maybeSingle();
 

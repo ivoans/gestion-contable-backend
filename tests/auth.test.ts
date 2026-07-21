@@ -65,14 +65,19 @@ describe('POST /api/auth/login', () => {
     expect(sb.calls).toHaveLength(0);
   });
 
-  it('401 si user no existe', async () => {
+  it('401 si user no existe (corre compare dummy para igualar timing)', async () => {
     sb.queue([{ table: 'users', result: { data: null, error: null } }]);
     const res = await request(app)
       .post('/api/auth/login')
       .send({ email: 'noexiste@b.com', password: 'x' });
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: 'Credenciales inválidas' });
-    expect(bcryptMock.compare).not.toHaveBeenCalled();
+    // Anti-enumeración por timing: se compara contra un hash bcrypt descartable
+    // aunque el user no exista, para no responder más rápido que el camino real.
+    expect(bcryptMock.compare).toHaveBeenCalledTimes(1);
+    const [pwd, hash] = bcryptMock.compare.mock.calls[0];
+    expect(pwd).toBe('x');
+    expect(hash).toMatch(/^\$2[aby]\$12\$/);
   });
 
   it('500 si DB devuelve error', async () => {
@@ -94,8 +99,10 @@ describe('POST /api/auth/login', () => {
       .send({ email: user.email, password: 'x' });
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: 'Credenciales inválidas' });
-    // Inactivo corta antes de comparar password.
-    expect(bcryptMock.compare).not.toHaveBeenCalled();
+    // Inactivo no compara contra el hash real, pero sí corre un compare dummy
+    // contra un hash descartable para igualar el timing con el camino válido.
+    expect(bcryptMock.compare).toHaveBeenCalledTimes(1);
+    expect(bcryptMock.compare.mock.calls[0][1]).toMatch(/^\$2[aby]\$12\$/);
   });
 
   it('respuesta idéntica para email inexistente, password mala, user inactivo (sin enumeration)', async () => {
@@ -269,5 +276,28 @@ describe('POST /api/auth/login', () => {
     expect(sb.calls[0].op).toBe('select');
     expect(sb.calls[0].filters).toContainEqual(['eq', 'email', 'x@y.com']);
     expect(sb.calls[0].terminal).toBe('maybeSingle');
+  });
+
+  it('normaliza el email (trim + lowercase) antes de consultar la DB', async () => {
+    sb.queue([{ table: 'users', result: { data: null, error: null } }]);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: '  Juan@Ejemplo.COM  ', password: '12345678' });
+    // 401 porque el mock devuelve null, pero la query usa el email normalizado.
+    expect(res.status).toBe(401);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'email', 'juan@ejemplo.com']);
+  });
+
+  it('login válido con email en mayúsculas y espacios (matchea el guardado en minúscula)', async () => {
+    const user = makeUser({ email: 'juan@ejemplo.com' });
+    sb.queue([
+      { table: 'users', result: { data: { ...user, password_hash: 'h' }, error: null } },
+    ]);
+    bcryptMock.compare.mockResolvedValue(true);
+    const res = await request(app)
+      .post('/api/auth/login')
+      .send({ email: '  JUAN@Ejemplo.com ', password: 'ok' });
+    expect(res.status).toBe(200);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'email', 'juan@ejemplo.com']);
   });
 });
