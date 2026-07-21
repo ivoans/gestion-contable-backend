@@ -24,9 +24,24 @@ export interface MonotributoPeriodo {
   comprobantes: number;
 }
 
+// Una fila de detalle (un comprobante emitido). imp_total con signo (NC negativo).
+export interface MonotributoComprobante {
+  periodo: string; // YYYY-MM-01
+  fecha: string; // YYYY-MM-DD
+  tipo: string;
+  punto_venta: string;
+  numero_desde: string;
+  numero_hasta: string;
+  doc_tipo_receptor: string;
+  doc_nro_receptor: string;
+  denominacion_receptor: string;
+  imp_total: number; // con signo: las notas de crédito quedan negativas
+}
+
 export interface ResultadoMonotributo {
   cuit: string | null;
   periodos: MonotributoPeriodo[];
+  detalle: MonotributoComprobante[];
 }
 
 export class MonotributoParseError extends Error {}
@@ -76,11 +91,28 @@ function buscarHeader(filas: unknown[][]): { idx: number; cols: Record<string, n
   for (let r = 0; r < Math.min(filas.length, 15); r++) {
     const fila = filas[r] ?? [];
     const headers = fila.map((c) => normHeader(c == null ? '' : String(c)));
+    const find = (pred: (h: string) => boolean) => headers.findIndex(pred);
     const idxFecha = headers.indexOf('fecha');
     const idxTipo = headers.indexOf('tipo');
-    const idxImpTotal = headers.findIndex((h) => h.includes('imp') && h.includes('total'));
+    const idxImpTotal = find((h) => h.includes('imp') && h.includes('total'));
     if (idxFecha !== -1 && idxImpTotal !== -1) {
-      return { idx: r, cols: { fecha: idxFecha, tipo: idxTipo, impTotal: idxImpTotal } };
+      return {
+        idx: r,
+        cols: {
+          fecha: idxFecha,
+          tipo: idxTipo,
+          impTotal: idxImpTotal,
+          // Columnas del detalle (todas opcionales: -1 si no están).
+          puntoVenta: find((h) => h.includes('punto') && h.includes('venta')),
+          numeroDesde: find((h) => h.includes('numero') && h.includes('desde')),
+          numeroHasta: find((h) => h.includes('numero') && h.includes('hasta')),
+          docTipoReceptor: find((h) => h.includes('tipo') && h.includes('doc') && h.includes('receptor')),
+          docNroReceptor: find(
+            (h) => (h.includes('nro') || h.includes('numero')) && h.includes('doc') && h.includes('receptor'),
+          ),
+          denominacionReceptor: find((h) => h.includes('denominacion') && h.includes('receptor')),
+        },
+      };
     }
   }
   return null;
@@ -95,10 +127,21 @@ export function parsearMonotributo(filas: unknown[][]): ResultadoMonotributo {
   }
 
   const cuit = buscarCuit(filas, header.idx);
-  const { fecha: cF, tipo: cT, impTotal: cImp } = header.cols;
+  const {
+    fecha: cF,
+    tipo: cT,
+    impTotal: cImp,
+    puntoVenta: cPV,
+    numeroDesde: cND,
+    numeroHasta: cNH,
+    docTipoReceptor: cDTR,
+    docNroReceptor: cDNR,
+    denominacionReceptor: cDR,
+  } = header.cols;
 
   // periodo "YYYY-MM" → acumulador.
   const acc = new Map<string, MonotributoPeriodo>();
+  const detalle: MonotributoComprobante[] = [];
 
   for (let r = header.idx + 1; r < filas.length; r++) {
     const fila = filas[r] ?? [];
@@ -106,6 +149,7 @@ export function parsearMonotributo(filas: unknown[][]): ResultadoMonotributo {
     const m = fechaStr.match(RE_FECHA);
     if (!m) continue; // fila vacía o no-detalle
 
+    const dia = Number(m[1]);
     const mes = Number(m[2]);
     const anio = Number(m[3]);
     if (mes < 1 || mes > 12) continue;
@@ -115,16 +159,30 @@ export function parsearMonotributo(filas: unknown[][]): ResultadoMonotributo {
     const monto = parseMonto(fila[cImp]) * signo;
 
     const key = `${anio}-${String(mes).padStart(2, '0')}`;
+    const periodo = `${key}-01`;
     const prev = acc.get(key) ?? {
       anio,
       mes,
-      periodo: `${key}-01`,
+      periodo,
       monto: 0,
       comprobantes: 0,
     };
     prev.monto += monto;
     prev.comprobantes += 1;
     acc.set(key, prev);
+
+    detalle.push({
+      periodo,
+      fecha: `${anio}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`,
+      tipo,
+      punto_venta: cPV >= 0 ? cell(fila, cPV) : '',
+      numero_desde: cND >= 0 ? cell(fila, cND) : '',
+      numero_hasta: cNH >= 0 ? cell(fila, cNH) : '',
+      doc_tipo_receptor: cDTR >= 0 ? cell(fila, cDTR) : '',
+      doc_nro_receptor: cDNR >= 0 ? cell(fila, cDNR) : '',
+      denominacion_receptor: cDR >= 0 ? cell(fila, cDR) : '',
+      imp_total: Math.round(monto * 100) / 100,
+    });
   }
 
   if (acc.size === 0) {
@@ -135,5 +193,5 @@ export function parsearMonotributo(filas: unknown[][]): ResultadoMonotributo {
     .map((p) => ({ ...p, monto: Math.round(p.monto * 100) / 100 }))
     .sort((a, b) => a.periodo.localeCompare(b.periodo));
 
-  return { cuit, periodos };
+  return { cuit, periodos, detalle };
 }

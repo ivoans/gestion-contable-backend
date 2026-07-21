@@ -6,6 +6,8 @@ import { parsearMonotributo, MonotributoParseError } from '../utils/monotributoP
 
 const ESCALA_FIELDS = 'id, estudio_id, categoria, tope_anual, orden, updated_at';
 const FACTURACION_FIELDS = 'id, estudio_id, cliente_id, periodo, monto, comprobantes, origen, created_at';
+const COMPROBANTE_FIELDS =
+  'id, periodo, fecha, tipo, punto_venta, numero_desde, numero_hasta, doc_tipo_receptor, doc_nro_receptor, denominacion_receptor, imp_total';
 
 // Ventana de recategorización: primer día del mes de hace 11 meses (incluye el mes actual → 12 meses).
 function cutoff12Meses(): string {
@@ -186,7 +188,45 @@ export async function importarFacturacion(req: Request, res: Response): Promise<
       return;
     }
 
-    res.json({ importados: rows.length, periodos: parsed.periodos });
+    // Detalle (comprobante a comprobante), idempotente por período: se borran los
+    // comprobantes de los meses presentes en el archivo y se insertan los nuevos.
+    const periodosArchivo = parsed.periodos.map((p) => p.periodo);
+    const { error: delError } = await supabase
+      .from('monotributo_comprobantes')
+      .delete()
+      .eq('cliente_id', cliente_id)
+      .in('periodo', periodosArchivo);
+    if (delError) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+
+    const detalleRows = parsed.detalle.map((c) => ({
+      estudio_id,
+      cliente_id,
+      periodo: c.periodo,
+      fecha: c.fecha,
+      tipo: c.tipo,
+      punto_venta: c.punto_venta || null,
+      numero_desde: c.numero_desde || null,
+      numero_hasta: c.numero_hasta || null,
+      doc_tipo_receptor: c.doc_tipo_receptor || null,
+      doc_nro_receptor: c.doc_nro_receptor || null,
+      denominacion_receptor: c.denominacion_receptor || null,
+      imp_total: c.imp_total,
+    }));
+
+    if (detalleRows.length > 0) {
+      const { error: insError } = await supabase
+        .from('monotributo_comprobantes')
+        .insert(detalleRows);
+      if (insError) {
+        res.status(500).json({ error: 'Error interno del servidor' });
+        return;
+      }
+    }
+
+    res.json({ importados: rows.length, comprobantes: detalleRows.length, periodos: parsed.periodos });
   } catch {
     res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -329,6 +369,84 @@ export async function getResumenCliente(req: Request, res: Response): Promise<vo
 
   try {
     const r = await armarResumen(estudio_id, cliente_id);
+    if (!r.ok) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+    res.json(r.data);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// ============================================================
+// DETALLE — comprobantes de un período (vista tipo Libro IVA).
+// ============================================================
+
+// Valida ?anio=&mes= y devuelve el primer día del mes como 'YYYY-MM-01'.
+function periodoDeQuery(req: Request): string | null {
+  const anio = Number(req.query.anio);
+  const mes = Number(req.query.mes);
+  if (!Number.isInteger(anio) || anio < 2000 || anio > 2100) return null;
+  if (!Number.isInteger(mes) || mes < 1 || mes > 12) return null;
+  return `${anio}-${String(mes).padStart(2, '0')}-01`;
+}
+
+// Lee los comprobantes de un cliente para un período. Scopeado por estudio_id.
+async function armarComprobantes(
+  estudio_id: string | null,
+  cliente_id: string,
+  periodo: string,
+): Promise<{ ok: true; data: unknown[] } | { ok: false }> {
+  const { data, error } = await supabase
+    .from('monotributo_comprobantes')
+    .select(COMPROBANTE_FIELDS)
+    .eq('estudio_id', estudio_id)
+    .eq('cliente_id', cliente_id)
+    .eq('periodo', periodo)
+    .order('fecha', { ascending: true })
+    .order('numero_desde', { ascending: true });
+
+  if (error) return { ok: false };
+  return { ok: true, data: data ?? [] };
+}
+
+// GET /api/monotributo/mio/comprobantes?anio=&mes= (cliente) — su propio detalle.
+export async function getMisComprobantes(req: Request, res: Response): Promise<void> {
+  const periodo = periodoDeQuery(req);
+  if (!periodo) {
+    res.status(400).json({ error: 'anio y mes son requeridos y deben ser válidos' });
+    return;
+  }
+  try {
+    const r = await armarComprobantes(req.user!.estudio_id, req.user!.id, periodo);
+    if (!r.ok) {
+      res.status(500).json({ error: 'Error interno del servidor' });
+      return;
+    }
+    res.json(r.data);
+  } catch {
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+}
+
+// GET /api/monotributo/comprobantes?cliente_id=&anio=&mes= (contador) — detalle del
+// cliente que elige la contadora.
+export async function getComprobantesCliente(req: Request, res: Response): Promise<void> {
+  const estudio_id = req.user!.estudio_id;
+  const cliente_id = req.query.cliente_id;
+
+  if (typeof cliente_id !== 'string' || !UUID_REGEX.test(cliente_id)) {
+    res.status(400).json({ error: 'cliente_id debe ser un uuid válido' });
+    return;
+  }
+  const periodo = periodoDeQuery(req);
+  if (!periodo) {
+    res.status(400).json({ error: 'anio y mes son requeridos y deben ser válidos' });
+    return;
+  }
+  try {
+    const r = await armarComprobantes(estudio_id, cliente_id, periodo);
     if (!r.ok) {
       res.status(500).json({ error: 'Error interno del servidor' });
       return;

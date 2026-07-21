@@ -83,4 +83,40 @@ describe('parsearMonotributo', () => {
   it('tira error si no hay comprobantes con fecha válida', () => {
     expect(() => parsearMonotributo([['Mis Comprobantes'], HEADER])).toThrow(MonotributoParseError);
   });
+
+  it('devuelve el detalle por comprobante con período, pto. venta y número', () => {
+    const f = (fecha: string, tipo: string, impTotal: string) => {
+      const r = fila(fecha, tipo, impTotal);
+      r[2] = '6'; // Punto de Venta
+      r[3] = '7561'; // Número Desde
+      r[4] = '7561'; // Número Hasta
+      return r;
+    };
+    const res = parsearMonotributo([
+      ['Mis Comprobantes Emitidos'],
+      HEADER,
+      f('01/05/2026', '11 - Factura C', '17500'),
+      f('02/06/2026', '11 - Factura C', '5000'),
+    ]);
+    expect(res.detalle).toHaveLength(2);
+    expect(res.detalle[0]).toMatchObject({
+      periodo: '2026-05-01',
+      fecha: '2026-05-01',
+      tipo: '11 - Factura C',
+      punto_venta: '6',
+      numero_desde: '7561',
+      imp_total: 17500,
+    });
+    expect(res.detalle[1].periodo).toBe('2026-06-01');
+  });
+
+  it('la nota de crédito queda con imp_total negativo en el detalle', () => {
+    const res = parsearMonotributo([
+      ['Mis Comprobantes Emitidos'],
+      HEADER,
+      fila('01/05/2026', '11 - Factura C', '17500'),
+      fila('05/05/2026', '13 - Nota de Crédito C', '2500'),
+    ]);
+    expect(res.detalle.map((c) => c.imp_total)).toEqual([17500, -2500]);
+  });
 });

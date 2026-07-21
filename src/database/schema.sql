@@ -511,6 +511,35 @@ CREATE TRIGGER trg_monotributo_facturacion_updated_at
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- ============================================================
+-- TABLA: monotributo_comprobantes (migración 016)
+-- ============================================================
+-- Detalle comprobante a comprobante del export AFIP "Mis Comprobantes Emitidos"
+-- (complementa el agregado mensual de monotributo_facturacion) para la vista tipo
+-- Libro IVA filtrable por período. Import idempotente por (cliente_id, periodo):
+-- re-subir un mes borra e inserta. imp_total con signo (NC en negativo).
+CREATE TABLE monotributo_comprobantes (
+  id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  estudio_id            UUID NOT NULL REFERENCES estudios(id) ON DELETE RESTRICT,
+  cliente_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  periodo               DATE NOT NULL,
+  fecha                 DATE NOT NULL,
+  tipo                  TEXT NOT NULL,
+  punto_venta           TEXT,
+  numero_desde          TEXT,
+  numero_hasta          TEXT,
+  doc_tipo_receptor     TEXT,
+  doc_nro_receptor      TEXT,
+  denominacion_receptor TEXT,
+  imp_total             DECIMAL(15, 2) NOT NULL,
+  created_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_monotributo_comprobantes_cliente_periodo
+  ON monotributo_comprobantes (cliente_id, periodo);
+CREATE INDEX idx_monotributo_comprobantes_estudio
+  ON monotributo_comprobantes (estudio_id);
+
+-- ============================================================
 -- SUELDOS (migración 015) — recibos de sueldo por cliente (módulo referencial).
 -- La contadora los carga (período + monto + empleado + PDF opcional); el cliente
 -- los ve en solo lectura. Habilitado para clientes con empleadores_sicoss / casas

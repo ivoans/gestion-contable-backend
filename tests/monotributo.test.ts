@@ -4,17 +4,41 @@ import type { SupabaseMock } from './helpers/supabaseMock';
 import { makeUser } from './helpers/factories';
 import { bearerFor } from './helpers/auth';
 
-const { sb } = await vi.hoisted(async () => {
+const { sb, xlsxMock } = await vi.hoisted(async () => {
   const { createSupabaseMock } = await import('./helpers/supabaseMock');
-  return { sb: createSupabaseMock() as SupabaseMock };
+  return {
+    sb: createSupabaseMock() as SupabaseMock,
+    xlsxMock: { xlsxBufferAFilas: vi.fn() },
+  };
 });
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
 vi.mock('../src/middleware/userStatus', () => ({
   getEstadoActivo: vi.fn(async () => ({ ok: true })),
 }));
+// Se mockea solo la lectura del .xlsx (no el parser): el parser real corre sobre
+// las filas que devuelve el mock, así el test cubre la cadena parser + controller.
+vi.mock('../src/utils/xlsxReader', () => ({ xlsxBufferAFilas: xlsxMock.xlsxBufferAFilas }));
 
 import { createApp } from '../src/app';
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+// Encabezado (recortado) del export AFIP "Mis Comprobantes Emitidos".
+const HEADER = [
+  'Fecha', 'Tipo', 'Punto de Venta', 'Número Desde', 'Número Hasta', 'Cód. Autorización',
+  'Tipo Doc. Receptor', 'Nro. Doc. Receptor', 'Denominación Receptor', 'Tipo Cambio', 'Moneda',
+  'Neto Grav. IVA 0%', 'IVA 2,5%', 'Neto Grav. IVA 2,5%', 'IVA 5%', 'Neto Grav. IVA 5%',
+  'IVA 10,5%', 'Neto Grav. IVA 10,5%', 'IVA 21%', 'Neto Grav. IVA 21%', 'IVA 27%',
+  'Neto Grav. IVA 27%', 'Neto Gravado Total', 'Neto No Gravado', 'Op. Exentas', 'Otros Tributos',
+  'Total IVA', 'Imp. Total',
+];
+// Fila de detalle con las columnas que persiste el detalle.
+function filaComp(fecha: string, tipo: string, pv: string, nro: string, impTotal: string): string[] {
+  const r = new Array(28).fill('');
+  r[0] = fecha; r[1] = tipo; r[2] = pv; r[3] = nro; r[4] = nro; r[27] = impTotal;
+  return r;
+}
 
 const contador = makeUser({ role: 'contador', estudio_id: 'estudio-1' });
 const cliente = makeUser({ role: 'cliente', estudio_id: 'estudio-1', condicion_fiscal: 'monotributista' });
@@ -24,6 +48,7 @@ const authCli = bearerFor(cliente);
 let app: ReturnType<typeof createApp>;
 beforeEach(() => {
   sb.reset();
+  xlsxMock.xlsxBufferAFilas.mockReset().mockReturnValue([]);
   app = createApp();
 });
 
@@ -161,5 +186,136 @@ describe('monotributo — GET /resumen (contador ve a un cliente)', () => {
     // La facturación se filtró por estudio_id (multi-tenant).
     expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-1']);
     expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', cliente.id]);
+  });
+});
+
+describe('monotributo — POST /facturacion/import (detalle + agregado)', () => {
+  const importar = () =>
+    request(app)
+      .post('/api/monotributo/facturacion/import')
+      .set('Authorization', authC)
+      .field('cliente_id', cliente.id)
+      .attach('archivo', Buffer.from('fake-xlsx'), { filename: 'comp.xlsx', contentType: XLSX_MIME });
+
+  it('upsertea el agregado y reemplaza el detalle por período (delete + insert)', async () => {
+    xlsxMock.xlsxBufferAFilas.mockReturnValue([
+      ['Mis Comprobantes Emitidos - CUIT 20231414143'],
+      HEADER,
+      filaComp('01/05/2026', '11 - Factura C', '6', '7561', '17500'),
+      filaComp('05/05/2026', '13 - Nota de Crédito C', '6', '7562', '2500'),
+    ]);
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, cuit: null, condicion_fiscal: 'monotributista' }, error: null } },
+      { table: 'monotributo_facturacion', result: { data: null, error: null } }, // upsert agregado
+      { table: 'monotributo_comprobantes', result: { data: null, error: null } }, // delete por período
+      { table: 'monotributo_comprobantes', result: { data: null, error: null } }, // insert detalle
+    ]);
+
+    const res = await importar();
+    expect(res.status).toBe(200);
+    expect(res.body.importados).toBe(1); // un período (mayo)
+    expect(res.body.comprobantes).toBe(2); // dos comprobantes
+
+    // Orden de operaciones: users → upsert facturacion → delete comprobantes → insert.
+    expect(sb.calls[1].op).toBe('upsert');
+    expect(sb.calls[1].table).toBe('monotributo_facturacion');
+    expect(sb.calls[2].op).toBe('delete');
+    expect(sb.calls[2].table).toBe('monotributo_comprobantes');
+    expect(sb.calls[2].filters).toContainEqual(['eq', 'cliente_id', cliente.id]);
+    expect(sb.calls[3].op).toBe('insert');
+
+    // El agregado del mes = 17500 − 2500 (la NC resta).
+    const factura = sb.calls[1].payload as { periodo: string; monto: number }[];
+    expect(factura[0]).toMatchObject({ periodo: '2026-05-01', monto: 15000 });
+
+    // El detalle guarda la NC con imp_total negativo y el período correcto.
+    const detalle = sb.calls[3].payload as { periodo: string; imp_total: number; tipo: string; punto_venta: string }[];
+    expect(detalle).toHaveLength(2);
+    expect(detalle[0]).toMatchObject({ periodo: '2026-05-01', imp_total: 17500, punto_venta: '6' });
+    expect(detalle[1].imp_total).toBe(-2500);
+  });
+
+  it('500 si falla el insert del detalle', async () => {
+    xlsxMock.xlsxBufferAFilas.mockReturnValue([
+      ['Mis Comprobantes Emitidos'],
+      HEADER,
+      filaComp('01/05/2026', '11 - Factura C', '6', '7561', '17500'),
+    ]);
+    sb.queue([
+      { table: 'users', result: { data: { id: cliente.id, cuit: null, condicion_fiscal: 'monotributista' }, error: null } },
+      { table: 'monotributo_facturacion', result: { data: null, error: null } },
+      { table: 'monotributo_comprobantes', result: { data: null, error: null } },
+      { table: 'monotributo_comprobantes', result: { data: null, error: { message: 'boom' } } },
+    ]);
+    const res = await importar();
+    expect(res.status).toBe(500);
+  });
+});
+
+describe('monotributo — GET /mio/comprobantes (cliente)', () => {
+  it('400 si falta mes/anio', async () => {
+    const res = await request(app).get('/api/monotributo/mio/comprobantes').set('Authorization', authCli);
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('200 devuelve el detalle del período, scopeado por cliente logueado + estudio', async () => {
+    sb.queue([
+      { table: 'monotributo_comprobantes', result: { data: [{ id: 'c1', periodo: '2026-05-01', imp_total: 17500 }], error: null } },
+    ]);
+    const res = await request(app)
+      .get('/api/monotributo/mio/comprobantes')
+      .query({ anio: 2026, mes: 5 })
+      .set('Authorization', authCli);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', cliente.id]);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-1']);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'periodo', '2026-05-01']);
+  });
+});
+
+describe('monotributo — GET /comprobantes (contador)', () => {
+  it('400 si falta cliente_id válido', async () => {
+    const res = await request(app)
+      .get('/api/monotributo/comprobantes')
+      .query({ anio: 2026, mes: 5 })
+      .set('Authorization', authC);
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('400 si mes inválido', async () => {
+    const res = await request(app)
+      .get('/api/monotributo/comprobantes')
+      .query({ cliente_id: cliente.id, anio: 2026, mes: 13 })
+      .set('Authorization', authC);
+    expect(res.status).toBe(400);
+    expect(sb.calls).toHaveLength(0);
+  });
+
+  it('403 si lo intenta un cliente', async () => {
+    const res = await request(app)
+      .get('/api/monotributo/comprobantes')
+      .query({ cliente_id: cliente.id, anio: 2026, mes: 5 })
+      .set('Authorization', authCli);
+    expect(res.status).toBe(403);
+  });
+
+  it('200 devuelve el detalle del cliente elegido y scopea por estudio', async () => {
+    sb.queue([
+      { table: 'monotributo_comprobantes', result: { data: [{ id: 'c1', periodo: '2026-05-01', imp_total: 17500 }], error: null } },
+    ]);
+    const res = await request(app)
+      .get('/api/monotributo/comprobantes')
+      .query({ cliente_id: cliente.id, anio: 2026, mes: 5 })
+      .set('Authorization', authC);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'estudio_id', 'estudio-1']);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'cliente_id', cliente.id]);
+    expect(sb.calls[0].filters).toContainEqual(['eq', 'periodo', '2026-05-01']);
   });
 });
