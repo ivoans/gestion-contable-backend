@@ -346,3 +346,51 @@ export async function sendVencidoCliente(
     throw err;
   }
 }
+
+// Digest al CLIENTE cuando se le generan las obligaciones del período: un solo email
+// listando todo lo generado (los montos llegan después, cada uno con su aviso 'nuevo').
+export async function sendGeneracionDigest(
+  to: string,
+  data: {
+    nombre: string;
+    /** Período en texto, p. ej. "julio 2026". */
+    periodo: string;
+    /** Tipos generados, p. ej. ['IVA', 'Autónomos']. */
+    tipos: string[];
+  }
+): Promise<ResultadoCanal> {
+  if (!emailsEnabled()) {
+    console.log(`[email] sendGeneracionDigest SKIP (EMAILS_ENABLED!=true) → ${to} | ${data.periodo}`);
+    return 'omitida';
+  }
+
+  const nombre = escapeHtml(data.nombre);
+  const periodo = escapeHtml(data.periodo);
+  const items = data.tipos
+    .map((t) => `<li style="padding:4px 0">${escapeHtml(t)}</li>`)
+    .join('');
+
+  try {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject: `Se generaron tus obligaciones de ${periodo}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+          <h2 style="color:#1e293b">Obligaciones de ${periodo}</h2>
+          <p>Hola <strong>${nombre}</strong>,</p>
+          <p>Tu contador generó tus obligaciones del período:</p>
+          <ul style="margin:16px 0;padding-left:20px;color:#1e293b">${items}</ul>
+          <p>Los montos todavía se están confirmando: te vamos a avisar cuando cada uno esté
+          listo para pagar, con su importe y vencimiento.</p>
+          <p style="color:#64748b;font-size:13px;margin-top:32px">Este es un mensaje automático del Sistema de Gestión Contable.</p>
+        </div>
+      `,
+    });
+    console.log(`[email] sendGeneracionDigest OK → ${to} | ${periodo} (${data.tipos.length} obligaciones)`);
+    return 'enviada';
+  } catch (err) {
+    console.error(`[email] sendGeneracionDigest FAIL → ${to} | ${data.periodo}`, err);
+    throw err;
+  }
+}

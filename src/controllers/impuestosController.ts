@@ -4,6 +4,7 @@ import { Impuesto, EstadoImpuesto, Obligacion, CondicionFiscal } from '../types'
 import { sendNuevoImpuesto } from '../services/emailService';
 import { sendPushToUser } from '../services/pushService';
 import { entregarNotificacion } from '../services/notificacionesService';
+import { notificarGeneracionDigest } from '../jobs/vencimientosCron';
 import { isValidCuit, normalizeCuit, isValidUuid } from '../utils/validators';
 import { formatFechaCorta } from '../utils/fechas';
 
@@ -607,15 +608,13 @@ type ClienteFiscal = {
 };
 
 // Obligaciones del cliente = base por condición + opcionales por flags.
-// sicoss/casas se chequean contra la condición por las dudas (la API ya
-// impide marcarlos en monotributistas, esto es solo defensa extra).
+// Los tres flags aplican a ambas condiciones fiscales (sicoss/casas se
+// habilitaron para monotributistas el 2026-07-14).
 function obligacionesDelCliente(c: ClienteFiscal): Obligacion[] {
   const base = [...OBLIGACIONES_POR_CONDICION[c.condicion_fiscal!]];
   if (c.convenio_multilateral) base.push('convenio_multilateral');
-  if (c.condicion_fiscal === 'responsable_inscripto') {
-    if (c.empleadores_sicoss) base.push('empleadores_sicoss');
-    if (c.casas_particulares) base.push('casas_particulares');
-  }
+  if (c.empleadores_sicoss) base.push('empleadores_sicoss');
+  if (c.casas_particulares) base.push('casas_particulares');
   return base;
 }
 
@@ -752,6 +751,16 @@ export async function generarImpuestos(req: Request, res: Response): Promise<voi
       }
 
       creados = insertData.length;
+    }
+
+    // Digest inmediato al cliente de lo generado (email + push, un aviso por cliente).
+    // El job diario lo reintenta; un fallo acá nunca voltea la generación (ya guardada).
+    if (creados > 0) {
+      try {
+        await notificarGeneracionDigest(periodo);
+      } catch (err) {
+        console.error('[impuestos] Digest de generación falló (impuestos guardados OK):', err);
+      }
     }
 
     res.json({

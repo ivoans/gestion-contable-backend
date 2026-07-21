@@ -10,6 +10,11 @@
 --   - casas_particulares: solo responsable_inscripto.
 --     Vence el mismo día para todos (terminacion_cuit = NULL en el calendario).
 --
+-- NOTA (2026-07-14): la restricción "solo responsable_inscripto" de
+-- empleadores_sicoss y casas_particulares se levantó — ahora aplican también
+-- a monotributistas. Era solo lógica de aplicación (nunca hubo CHECK en DB),
+-- así que no requiere migración.
+--
 -- IMPORTANTE (Postgres): ALTER TYPE ... ADD VALUE no puede convivir en la
 -- misma transacción con DDL que use el valor nuevo. Acá no se usa el valor
 -- nuevo en ningún CHECK, pero igual se commitea aparte (mismo patrón que 001).

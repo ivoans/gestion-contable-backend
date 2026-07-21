@@ -49,3 +49,10 @@ export async function signedUrlComprobante(path: string): Promise<string | null>
 export async function borrarComprobante(path: string): Promise<void> {
   await supabase.storage.from(COMPROBANTES_BUCKET).remove([path]);
 }
+
+/** Descarga un objeto del bucket como Buffer (null si no existe o falla). */
+export async function descargarComprobante(path: string): Promise<Buffer | null> {
+  const { data, error } = await supabase.storage.from(COMPROBANTES_BUCKET).download(path);
+  if (error || !data) return null;
+  return Buffer.from(await data.arrayBuffer());
+}

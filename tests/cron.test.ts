@@ -10,16 +10,26 @@ const { sb } = await vi.hoisted(async () => {
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
 
 // Canales mockeados: controlamos enviada / omitida (canal off) / throw (fallo real).
-const { sendVencido, sendVencidoCliente, sendRecordatorio, sendPushToUser } = vi.hoisted(() => ({
+const { sendVencido, sendVencidoCliente, sendRecordatorio, sendGeneracionDigest, sendPushToUser } = vi.hoisted(() => ({
   sendVencido: vi.fn(),
   sendVencidoCliente: vi.fn(),
   sendRecordatorio: vi.fn(),
+  sendGeneracionDigest: vi.fn(),
   sendPushToUser: vi.fn(),
 }));
-vi.mock('../src/services/emailService', () => ({ sendVencido, sendVencidoCliente, sendRecordatorio }));
+vi.mock('../src/services/emailService', () => ({
+  sendVencido,
+  sendVencidoCliente,
+  sendRecordatorio,
+  sendGeneracionDigest,
+}));
 vi.mock('../src/services/pushService', () => ({ sendPushToUser }));
 
-import { procesarVencidos, procesarRecordatorios } from '../src/jobs/vencimientosCron';
+import {
+  procesarVencidos,
+  procesarRecordatorios,
+  notificarGeneracionDigest,
+} from '../src/jobs/vencimientosCron';
 
 const ok = (data: unknown = null): FromCall['result'] => ({ data, error: null });
 
@@ -331,5 +341,99 @@ describe('cron · procesarRecordatorios', () => {
     const updates = sb.calls.filter((c) => c.table === 'notificaciones' && c.op === 'update');
     expect(updates).toHaveLength(2);
     expect(updates.every((c) => c.payload?.estado_envio === 'enviada')).toBe(true);
+  });
+});
+
+describe('cron · notificarGeneracionDigest', () => {
+  const borrador = (id: string, cliente_id: string, tipo: string, email = `${cliente_id}@mail.com`, nombre = 'Juan') => ({
+    id,
+    cliente_id,
+    tipo,
+    cliente: { nombre, email },
+  });
+
+  beforeEach(() => {
+    sb.reset();
+    sendGeneracionDigest.mockReset();
+    sendGeneracionDigest.mockResolvedValue('enviada');
+    sendPushToUser.mockReset();
+    sendPushToUser.mockResolvedValue('omitida');
+  });
+
+  it('agrupa por cliente: UN digest email+push por cliente, anclado a su primer borrador', async () => {
+    sb.queue([
+      {
+        table: 'impuestos',
+        result: ok([
+          borrador('imp1', 'cli1', 'IVA'),
+          borrador('imp2', 'cli1', 'Autónomos'),
+          borrador('imp3', 'cli2', 'Monotributo', 'cli2@mail.com', 'Ana'),
+        ]),
+      },
+      // cli1: email (lookup/insert/update) + push (lookup/insert, omitida).
+      notifLookup(null), notifInsert('n1'), notifUpdate(), ...pushOmitida(),
+      // cli2: ídem.
+      notifLookup(null), notifInsert('n2'), notifUpdate(), ...pushOmitida(),
+    ]);
+
+    await notificarGeneracionDigest('2026-06-01');
+
+    // Un email por cliente, con TODAS sus obligaciones y el período en texto.
+    expect(sendGeneracionDigest).toHaveBeenCalledTimes(2);
+    expect(sendGeneracionDigest).toHaveBeenCalledWith('cli1@mail.com', {
+      nombre: 'Juan',
+      periodo: 'junio 2026',
+      tipos: ['IVA', 'Autónomos'],
+    });
+    expect(sendGeneracionDigest).toHaveBeenCalledWith('cli2@mail.com', {
+      nombre: 'Ana',
+      periodo: 'junio 2026',
+      tipos: ['Monotributo'],
+    });
+
+    // El ancla es el PRIMER borrador de cada cliente (dedup por (ancla, tipo, canal)).
+    const inserts = sb.calls.filter((c) => c.table === 'notificaciones' && c.op === 'insert');
+    expect(inserts.map((c) => (c.payload as { impuesto_id: string }).impuesto_id)).toEqual([
+      'imp1', 'imp1', 'imp3', 'imp3',
+    ]);
+    expect(inserts.every((c) => (c.payload as { tipo: string }).tipo === 'generacion_digest')).toBe(true);
+  });
+
+  it('dedup: si el digest del cliente ya está enviada, no reenvía (email ni push)', async () => {
+    sb.queue([
+      { table: 'impuestos', result: ok([borrador('imp1', 'cli1', 'IVA')]) },
+      // Email y push ya entregados: el lookup corta antes de cualquier envío.
+      notifLookup({ id: 'n1', estado_envio: 'enviada', intentos: 1 }),
+      notifLookup({ id: 'n2', estado_envio: 'enviada', intentos: 1 }),
+    ]);
+
+    await notificarGeneracionDigest('2026-06-01');
+
+    expect(sendGeneracionDigest).not.toHaveBeenCalled();
+    expect(sendPushToUser).not.toHaveBeenCalled();
+  });
+
+  it('sin borradores del período no hace nada', async () => {
+    sb.queue([{ table: 'impuestos', result: ok([]) }]);
+
+    await notificarGeneracionDigest('2026-06-01');
+
+    expect(sendGeneracionDigest).not.toHaveBeenCalled();
+    expect(sb.calls).toHaveLength(1);
+  });
+
+  it('fallo del email marca la fila fallida y el push igual sale', async () => {
+    sendGeneracionDigest.mockRejectedValue(new Error('resend caído'));
+    sb.queue([
+      { table: 'impuestos', result: ok([borrador('imp1', 'cli1', 'IVA')]) },
+      // Email: lookup/insert/update (fallida). Push: lookup/insert (omitida).
+      notifLookup(null), notifInsert('n1'), notifUpdate(), ...pushOmitida(),
+    ]);
+
+    await notificarGeneracionDigest('2026-06-01');
+
+    const upd = sb.calls.find((c) => c.table === 'notificaciones' && c.op === 'update');
+    expect(upd?.payload).toMatchObject({ estado_envio: 'fallida', ultimo_error: 'resend caído' });
+    expect(sendPushToUser).toHaveBeenCalledTimes(1);
   });
 });

@@ -2,10 +2,10 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { supabase } from '../lib/supabase';
 import { CondicionFiscal, User } from '../types';
-import { isValidCuit, isValidEmail, normalizeCuit } from '../utils/validators';
+import { isValidCuit, isValidEmail, normalizeCuit, normalizeEmail } from '../utils/validators';
 
 const USER_FIELDS =
-  'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, convenio_multilateral, empleadores_sicoss, casas_particulares, telefono, activo, created_at';
+  'id, estudio_id, nombre, email, role, cuit, condicion_fiscal, categoria, convenio_multilateral, empleadores_sicoss, casas_particulares, telefono, domicilio, activo, created_at';
 
 const CONDICIONES_FISCALES: readonly CondicionFiscal[] = ['monotributista', 'responsable_inscripto'];
 
@@ -14,8 +14,8 @@ function isValidCondicionFiscal(value: unknown): value is CondicionFiscal {
 }
 
 // Flags de impuestos opcionales. Opcionales en el body (default false); si
-// vienen deben ser boolean. empleadores_sicoss y casas_particulares solo
-// aplican a responsable_inscripto; convenio_multilateral a ambas condiciones.
+// vienen deben ser boolean. Los tres aplican a ambas condiciones fiscales
+// (sicoss/casas se habilitaron para monotributistas el 2026-07-14).
 type FlagsOpcionales = {
   convenio_multilateral: boolean;
   empleadores_sicoss: boolean;
@@ -24,7 +24,6 @@ type FlagsOpcionales = {
 
 function validarFlagsOpcionales(
   body: Record<string, unknown>,
-  condicion: CondicionFiscal,
 ): { ok: true; flags: FlagsOpcionales } | { ok: false; error: string } {
   const flags: FlagsOpcionales = {
     convenio_multilateral: false,
@@ -41,18 +40,11 @@ function validarFlagsOpcionales(
     flags[key] = value;
   }
 
-  if (condicion === 'monotributista' && (flags.empleadores_sicoss || flags.casas_particulares)) {
-    return {
-      ok: false,
-      error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
-    };
-  }
-
   return { ok: true, flags };
 }
 
 export async function crearCliente(req: Request, res: Response): Promise<void> {
-  const { nombre, email, password, cuit, condicion_fiscal, categoria, telefono } = req.body as {
+  const { nombre, email, password, cuit, condicion_fiscal, categoria, telefono, domicilio } = req.body as {
     nombre?: string;
     email?: string;
     password?: string;
@@ -60,6 +52,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     condicion_fiscal?: string;
     categoria?: string | null;
     telefono?: string;
+    domicilio?: string;
   };
 
   if (!nombre || !email || !password) {
@@ -67,7 +60,9 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!isValidEmail(email)) {
+  const emailNormalizado = normalizeEmail(email);
+
+  if (!isValidEmail(emailNormalizado)) {
     res.status(400).json({ error: 'Email inválido' });
     return;
   }
@@ -88,7 +83,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const flagsResult = validarFlagsOpcionales(req.body as Record<string, unknown>, condicion_fiscal);
+  const flagsResult = validarFlagsOpcionales(req.body as Record<string, unknown>);
   if (!flagsResult.ok) {
     res.status(400).json({ error: flagsResult.error });
     return;
@@ -100,7 +95,7 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
     const { data: existing, error: checkError } = await supabase
       .from('users')
       .select('id')
-      .eq('email', email)
+      .eq('email', emailNormalizado)
       .maybeSingle();
 
     if (checkError) {
@@ -119,13 +114,14 @@ export async function crearCliente(req: Request, res: Response): Promise<void> {
       .from('users')
       .insert({
         nombre,
-        email,
+        email: emailNormalizado,
         password_hash,
         cuit: cuitNormalizado,
         condicion_fiscal,
         categoria: categoria ?? null,
         ...flagsResult.flags,
         telefono: telefono ?? null,
+        domicilio: domicilio ?? null,
         role: 'cliente',
         estudio_id,
         activo: true,
@@ -198,18 +194,23 @@ export async function obtenerCliente(req: Request, res: Response): Promise<void>
 export async function actualizarCliente(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
   const estudio_id = req.user!.estudio_id;
-  const { nombre, email, cuit, condicion_fiscal, categoria, telefono } = req.body as {
+  const { nombre, email, cuit, condicion_fiscal, categoria, telefono, domicilio } = req.body as {
     nombre?: string;
     email?: string;
     cuit?: string;
     condicion_fiscal?: string;
     categoria?: string | null;
     telefono?: string;
+    domicilio?: string;
   };
 
-  if (email !== undefined && !isValidEmail(email)) {
-    res.status(400).json({ error: 'Email inválido' });
-    return;
+  let emailNormalizado: string | undefined;
+  if (email !== undefined) {
+    emailNormalizado = normalizeEmail(email);
+    if (!isValidEmail(emailNormalizado)) {
+      res.status(400).json({ error: 'Email inválido' });
+      return;
+    }
   }
 
   if (condicion_fiscal !== undefined && !isValidCondicionFiscal(condicion_fiscal)) {
@@ -238,11 +239,12 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
 
   const updates: Partial<Record<string, unknown>> = {};
   if (nombre !== undefined) updates.nombre = nombre;
-  if (email !== undefined) updates.email = email;
+  if (email !== undefined) updates.email = emailNormalizado;
   if (cuit !== undefined) updates.cuit = cuitNormalizado;
   if (condicion_fiscal !== undefined) updates.condicion_fiscal = condicion_fiscal;
   if (categoria !== undefined) updates.categoria = categoria;
   if (telefono !== undefined) updates.telefono = telefono;
+  if (domicilio !== undefined) updates.domicilio = domicilio;
   for (const key of FLAG_KEYS) {
     if (bodyRaw[key] !== undefined) updates[key] = bodyRaw[key];
   }
@@ -255,7 +257,7 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
   try {
     const { data: existing, error: findError } = await supabase
       .from('users')
-      .select('id, condicion_fiscal, empleadores_sicoss, casas_particulares')
+      .select('id')
       .eq('id', id)
       .eq('role', 'cliente')
       .eq('estudio_id', estudio_id)
@@ -271,38 +273,11 @@ export async function actualizarCliente(req: Request, res: Response): Promise<vo
       return;
     }
 
-    // Coherencia flags ↔ condición: con la condición efectiva (la del body o
-    // la guardada), monotributista no puede quedar con sicoss/casas en true.
-    // Si la condición pasa a monotributista y los flags no vienen en el body,
-    // se limpian solos (evita flags huérfanos al cambiar de condición).
-    const actual = existing as {
-      id: string;
-      condicion_fiscal: CondicionFiscal | null;
-      empleadores_sicoss: boolean;
-      casas_particulares: boolean;
-    };
-    const condicionEfectiva = (condicion_fiscal as CondicionFiscal | undefined) ?? actual.condicion_fiscal;
-
-    if (condicionEfectiva === 'monotributista') {
-      const sicossEfectivo = (bodyRaw.empleadores_sicoss as boolean | undefined) ?? actual.empleadores_sicoss;
-      const casasEfectivo = (bodyRaw.casas_particulares as boolean | undefined) ?? actual.casas_particulares;
-
-      if (bodyRaw.empleadores_sicoss === true || bodyRaw.casas_particulares === true) {
-        res.status(400).json({
-          error: 'empleadores_sicoss y casas_particulares solo aplican a responsable_inscripto',
-        });
-        return;
-      }
-
-      if (sicossEfectivo) updates.empleadores_sicoss = false;
-      if (casasEfectivo) updates.casas_particulares = false;
-    }
-
-    if (email) {
+    if (emailNormalizado) {
       const { data: emailTaken, error: emailError } = await supabase
         .from('users')
         .select('id')
-        .eq('email', email)
+        .eq('email', emailNormalizado)
         .neq('id', id)
         .maybeSingle();
 

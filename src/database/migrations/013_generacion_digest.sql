@@ -1,0 +1,22 @@
+-- ============================================================
+-- MIGRACIÓN 013: aviso digest al generar impuestos
+-- ============================================================
+-- APLICAR A MANO EN SUPABASE — no se aplica automáticamente.
+--
+-- Pedido de la contadora: que el cliente se entere apenas se le generan sus
+-- obligaciones del período, sin esperar a que se cargue cada monto. Como la
+-- generación crea varios impuestos de una, el aviso es UN digest por cliente
+-- (email + push) listando todo lo generado, en vez de N notificaciones juntas.
+-- El monto de cada impuesto sigue avisándose después con el tipo 'nuevo'
+-- (borrador → pendiente), como hasta ahora.
+--
+-- El digest se ancla al borrador más antiguo del cliente en el período (la
+-- tabla notificaciones exige un target impuesto/honorario), así el dedup
+-- (target, tipo, canal) garantiza un solo digest por cliente y período.
+--
+-- NOTA: `ALTER TYPE ... ADD VALUE` no puede correr dentro de un bloque de
+-- transacción que después use el valor, por eso va como sentencia suelta
+-- (sin BEGIN/COMMIT). Idempotente gracias a IF NOT EXISTS.
+-- ============================================================
+
+ALTER TYPE tipo_notificacion ADD VALUE IF NOT EXISTS 'generacion_digest';

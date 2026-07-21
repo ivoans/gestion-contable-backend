@@ -9,6 +9,8 @@ import {
   getFacturacionCliente,
   getResumenCliente,
   getMio,
+  getMisComprobantes,
+  getComprobantesCliente,
 } from '../controllers/monotributoController';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -32,6 +34,8 @@ const router = Router();
 
 // Cliente — su propia facturación + posición vs escala (sin exponer la tabla de escala).
 router.get('/mio', authenticate, requireRole('cliente'), getMio);
+// Cliente — su detalle de comprobantes de un período (vista tipo Libro IVA).
+router.get('/mio/comprobantes', authenticate, requireRole('cliente'), getMisComprobantes);
 
 // Escala (contador/admin) — la edita por estudio.
 router.get('/escala', authenticate, requireRole('contador', 'admin'), getEscala);
@@ -49,5 +53,7 @@ router.get('/facturacion', authenticate, requireRole('contador'), getFacturacion
 
 // Resumen de un cliente (serie 12m + posición), para la vista del contador.
 router.get('/resumen', authenticate, requireRole('contador'), getResumenCliente);
+// Detalle de comprobantes de un cliente/período, para la vista del contador.
+router.get('/comprobantes', authenticate, requireRole('contador'), getComprobantesCliente);
 
 export default router;

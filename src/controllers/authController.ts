@@ -3,8 +3,13 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { supabase } from '../lib/supabase';
 import { User, JwtPayload } from '../types';
-import { isValidEmail } from '../utils/validators';
+import { isValidEmail, normalizeEmail } from '../utils/validators';
 import { setAuthCookies, clearAuthCookies, generateCsrfToken } from '../lib/cookies';
+
+// Hash bcrypt cost-12 fijo (de un password que no existe) para igualar el tiempo
+// de respuesta cuando el email no existe o el user está inactivo: sin esto no se
+// corre bcrypt.compare y el login responde más rápido → enumeración por timing.
+const DUMMY_HASH = '$2b$12$mZJ9rVuqSdwF8.SfChUT8.jW4gNCS9C1jOFX1plDS1xZdi5pO04LG';
 
 export async function login(req: Request, res: Response): Promise<void> {
   const { email, password, remember } = req.body as {
@@ -18,7 +23,9 @@ export async function login(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!isValidEmail(email)) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!isValidEmail(normalizedEmail)) {
     res.status(400).json({ error: 'Email inválido' });
     return;
   }
@@ -27,7 +34,7 @@ export async function login(req: Request, res: Response): Promise<void> {
     const { data: user, error } = await supabase
       .from('users')
       .select('*')
-      .eq('email', email)
+      .eq('email', normalizedEmail)
       .maybeSingle();
 
     if (error) {
@@ -36,6 +43,8 @@ export async function login(req: Request, res: Response): Promise<void> {
     }
 
     if (!user) {
+      // corre un compare descartable para no filtrar por timing que el email no existe
+      await bcrypt.compare(password, DUMMY_HASH);
       res.status(401).json({ error: 'Credenciales inválidas' });
       return;
     }
@@ -43,6 +52,7 @@ export async function login(req: Request, res: Response): Promise<void> {
     const typedUser = user as User & { password_hash: string };
 
     if (!typedUser.activo) {
+      await bcrypt.compare(password, DUMMY_HASH);
       res.status(401).json({ error: 'Credenciales inválidas' });
       return;
     }

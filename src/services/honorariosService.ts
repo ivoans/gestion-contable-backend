@@ -1,9 +1,25 @@
 import { supabase } from '../lib/supabase';
+import { mesSiguiente, periodoAnteriorAR } from '../utils/fechas';
 
 const MESES_ES = [
   'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
   'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
 ];
+
+/**
+ * Los honorarios se facturan A MES VENCIDO: el período (anio, mes) es el mes de
+ * servicio ya trabajado, y vence en el mes SIGUIENTE al día del plan. Ej.: el
+ * período junio se genera el 1/7 y vence el 10/7.
+ */
+export function fechaVencimientoDe(anio: number, mes: number, dia: number): string {
+  const venc = mesSiguiente(anio, mes);
+  return `${venc.anio}-${String(venc.mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+
+/** "Honorarios Junio 2026" — descripción estándar del honorario mensual. */
+export function descripcionPeriodo(anio: number, mes: number): string {
+  return `Honorarios ${MESES_ES[mes - 1]} ${anio}`;
+}
 
 type PlanRow = {
   cliente_id: string;
@@ -64,6 +80,8 @@ async function revivirAnulados(
 
 /**
  * Genera los honorarios del período (anio, mes) a partir de los planes activos.
+ * A MES VENCIDO: (anio, mes) es el mes de servicio y el vencimiento cae en el mes
+ * siguiente (el cron del 1/7 genera "junio", que vence en julio).
  *  - estudio_id: si se pasa, solo ese estudio (endpoint del contador). Si no, todos
  *    los estudios (cron mensual).
  *  - creado_por: id del contador en el alta manual; null cuando lo dispara el cron.
@@ -101,8 +119,8 @@ export async function generarHonorarios(opts: {
       creado_por: opts.creado_por ?? null,
       periodo,
       monto: p.monto,
-      fecha_vencimiento: `${anio}-${mm}-${String(p.dia_vencimiento).padStart(2, '0')}`,
-      descripcion: `Honorarios ${MESES_ES[mes - 1]} ${anio}`,
+      fecha_vencimiento: fechaVencimientoDe(anio, mes, p.dia_vencimiento),
+      descripcion: descripcionPeriodo(anio, mes),
       estado: 'pendiente' as const,
     }));
 
@@ -129,23 +147,21 @@ export async function generarHonorarios(opts: {
 }
 
 /**
- * Genera el honorario del MES ACTUAL para un cliente puntual. Se usa al crear/editar
- * el plan, así el honorario aparece al instante sin esperar al cron ni a "Generar mes".
- * Idempotente: si el del mes ya existe, no lo toca (ignoreDuplicates).
+ * Genera el honorario del período EN CURSO DE COBRO (el mes anterior, por mes vencido)
+ * para un cliente puntual. Se usa al crear/editar el plan, así el honorario aparece al
+ * instante sin esperar al cron ni a "Generar período".
+ * Idempotente: si el del período ya existe, no lo toca (ignoreDuplicates).
  */
-export async function generarHonorarioClienteMesActual(opts: {
+export async function generarHonorarioClientePeriodoActual(opts: {
   estudio_id: string;
   cliente_id: string;
   monto: number;
   dia_vencimiento: number;
   creado_por?: string | null;
 }): Promise<void> {
-  const now = new Date();
-  const anio = now.getFullYear();
-  const mes = now.getMonth() + 1;
-  const mm = String(mes).padStart(2, '0');
-  const periodo = `${anio}-${mm}-01`;
-  const fecha_vencimiento = `${anio}-${mm}-${String(opts.dia_vencimiento).padStart(2, '0')}`;
+  const { anio, mes } = periodoAnteriorAR();
+  const periodo = `${anio}-${String(mes).padStart(2, '0')}-01`;
+  const fecha_vencimiento = fechaVencimientoDe(anio, mes, opts.dia_vencimiento);
 
   await supabase.from('honorarios').upsert(
     {
@@ -155,12 +171,12 @@ export async function generarHonorarioClienteMesActual(opts: {
       periodo,
       monto: opts.monto,
       fecha_vencimiento,
-      descripcion: `Honorarios ${MESES_ES[mes - 1]} ${anio}`,
+      descripcion: descripcionPeriodo(anio, mes),
       estado: 'pendiente',
     },
     { onConflict: 'cliente_id, periodo', ignoreDuplicates: true },
   );
 
-  // Si ya existía pero estaba anulado, revivirlo (misma lógica que "Generar mes").
+  // Si ya existía pero estaba anulado, revivirlo (misma lógica que "Generar período").
   await revivirAnulados(periodo, new Map([[opts.cliente_id, { monto: opts.monto, fecha_vencimiento }]]));
 }

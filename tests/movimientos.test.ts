@@ -16,14 +16,19 @@ const { sb, xlsxMock, parserMock } = await vi.hoisted(async () => {
 
 vi.mock('../src/lib/supabase', () => ({ supabase: sb.client }));
 // authenticate hace lookup de activo en DB (S1); acá se mockea siempre-activo
-// para no interferir con la cola del supabaseMock de cada test.
+// para no interferir con la cola del supabaseMock de cada test. Las rutas
+// mis-movimientos exigen responsable_inscripto, así que el default lo incluye;
+// los tests del gate lo pisan con mockResolvedValueOnce.
 vi.mock('../src/middleware/userStatus', () => ({
-  getEstadoActivo: vi.fn(async () => ({ ok: true })),
+  getEstadoActivo: vi.fn(async () => ({ ok: true, condicion_fiscal: 'responsable_inscripto' })),
 }));
 vi.mock('../src/utils/xlsxReader', () => ({ xlsxBufferAFilas: xlsxMock.xlsxBufferAFilas }));
 vi.mock('../src/utils/libroIvaParser', () => ({ parsearLibroIVA: parserMock.parsearLibroIVA }));
 
 import { createApp } from '../src/app';
+import { getEstadoActivo } from '../src/middleware/userStatus';
+
+const getEstadoActivoMock = vi.mocked(getEstadoActivo);
 
 // uuids reales (el endpoint valida formato uuid en cliente_id).
 const CLIENTE_A = '11111111-1111-4111-8111-111111111111';
@@ -1092,6 +1097,20 @@ describe('movimientos — LECTURA CLIENTE (mis-movimientos)', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
+    it('403 si el cliente es monotributista (Libro IVA solo responsable_inscripto)', async () => {
+      getEstadoActivoMock.mockResolvedValueOnce({ ok: true, condicion_fiscal: 'monotributista' });
+      const res = await list(authCliente, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si el cliente no tiene condición fiscal cargada', async () => {
+      getEstadoActivoMock.mockResolvedValueOnce({ ok: true, condicion_fiscal: null });
+      const res = await list(authCliente, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
     it('400 si anio fuera de rango', async () => {
       const res = await list(authCliente, { ...baseQuery, anio: '1999' });
       expect(res.status).toBe(400);
@@ -1185,6 +1204,13 @@ describe('movimientos — LECTURA CLIENTE (mis-movimientos)', () => {
       expect(sb.calls).toHaveLength(0);
     });
 
+    it('403 si el cliente es monotributista', async () => {
+      getEstadoActivoMock.mockResolvedValueOnce({ ok: true, condicion_fiscal: 'monotributista' });
+      const res = await resumen(authCliente, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
     it('400 si anio fuera de rango', async () => {
       const res = await resumen(authCliente, { ...baseQuery, anio: '2101' });
       expect(res.status).toBe(400);
@@ -1270,6 +1296,13 @@ describe('movimientos — LECTURA CLIENTE (mis-movimientos)', () => {
 
     it('403 si role=admin', async () => {
       const res = await tendencia(adminAuth, baseQuery);
+      expect(res.status).toBe(403);
+      expect(sb.calls).toHaveLength(0);
+    });
+
+    it('403 si el cliente es monotributista', async () => {
+      getEstadoActivoMock.mockResolvedValueOnce({ ok: true, condicion_fiscal: 'monotributista' });
+      const res = await tendencia(authCliente, baseQuery);
       expect(res.status).toBe(403);
       expect(sb.calls).toHaveLength(0);
     });

@@ -4,6 +4,16 @@ export function isValidEmail(email: unknown): email is string {
   return typeof email === 'string' && email.length <= 254 && EMAIL_REGEX.test(email);
 }
 
+/**
+ * Normaliza un email para guardarlo y compararlo: recorta espacios y pasa a
+ * minúsculas. Se aplica en el borde (login + alta/edición de cliente) para que
+ * lo almacenado y lo consultado siempre matcheen — evita cuentas duplicadas por
+ * capitalización y logins que no encuentran al usuario por una mayúscula.
+ */
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**

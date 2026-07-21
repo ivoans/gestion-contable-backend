@@ -1,7 +1,12 @@
 export type Role = 'admin' | 'contador' | 'cliente';
 export type CondicionFiscal = 'monotributista' | 'responsable_inscripto';
 export type EstadoImpuesto = 'borrador' | 'pendiente' | 'vencido' | 'pagado';
-export type TipoNotificacion = 'nuevo' | 'recordatorio_3dias' | 'vencido' | 'vencido_cliente';
+export type TipoNotificacion =
+  | 'nuevo'
+  | 'recordatorio_3dias'
+  | 'vencido'
+  | 'vencido_cliente'
+  | 'generacion_digest';
 export type CanalNotificacion = 'email' | 'push';
 export type Obligacion =
   | 'monotributo'
@@ -25,6 +30,7 @@ export interface User {
   empleadores_sicoss: boolean;
   casas_particulares: boolean;
   telefono: string | null;
+  domicilio: string | null;
   activo: boolean;
   created_at: string;
 }
@@ -33,6 +39,16 @@ export interface Estudio {
   id: string;
   nombre: string;
   activo: boolean;
+  // Identidad fiscal para el recibo de cobranza (migración 014).
+  domicilio: string | null;
+  cuit: string | null;
+  telefono: string | null;
+  email: string | null;
+  condicion_iva: string | null;
+  inicio_actividades: string | null;
+  logo_path: string | null;
+  recibo_punto_venta: number;
+  recibo_proximo_numero: number;
   created_at: string;
 }
 
@@ -69,12 +85,13 @@ export interface HonorarioPlan {
 }
 
 // Instancia mensual del honorario (generada del plan o creada a mano).
+// periodo NULL = honorario SUELTO (sin plan, con descripcion obligatoria).
 export interface Honorario {
   id: string;
   estudio_id: string;
   cliente_id: string;
   creado_por: string | null;
-  periodo: string;
+  periodo: string | null;
   monto: number;
   fecha_vencimiento: string;
   descripcion: string | null;
@@ -83,6 +100,23 @@ export interface Honorario {
   pagado_por: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// Recibo de cobranza emitido al confirmar el cobro de un honorario (migración 014).
+export interface Recibo {
+  id: string;
+  estudio_id: string;
+  honorario_id: string;
+  cliente_id: string;
+  emitido_por: string | null;
+  punto_venta: number;
+  numero: number;
+  fecha: string;
+  metodo_pago: string;
+  concepto: string;
+  monto: number;
+  storage_path: string;
+  created_at: string;
 }
 
 export interface Vencimiento {
@@ -178,9 +212,77 @@ export interface Notificacion {
   enviada_at: string;
 }
 
+// Recibo de sueldo cargado por la contadora (módulo referencial, E3 / migración 015).
+// El cliente lo ve en solo lectura. El PDF (opcional) vive en Storage; acá la metadata.
+export interface Sueldo {
+  id: string;
+  estudio_id: string;
+  cliente_id: string;
+  empleado: string;
+  periodo: string; // YYYY-MM-DD (primer día del mes)
+  monto: number;
+  storage_path: string | null;
+  mime: string | null;
+  size_bytes: number | null;
+  original_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Estado de cuenta / cuenta corriente (no se persiste; se arma en memoria) ──
+export type OrigenDeuda = 'impuesto' | 'honorario';
+
+// Una obligación adeudada (impuesto o honorario) dentro del estado de cuenta.
+export interface DeudaItem {
+  id: string;
+  origen: OrigenDeuda;
+  concepto: string;
+  fecha_vencimiento: string;
+  monto: number;
+  estado: string; // 'pendiente' | 'vencido'
+  dias_vencido: number; // 0 si todavía no venció
+}
+
+export interface BloqueDeuda {
+  items: DeudaItem[];
+  subtotal: number;
+}
+
+// Buckets de antigüedad de deuda. por_vencer = aún no vencida.
+export interface Aging {
+  por_vencer: number;
+  d0_30: number;
+  d31_60: number;
+  d61_90: number;
+  d90_mas: number;
+}
+
+// Estado de cuenta de un cliente: dos bloques (impuestos + estudio) + total + aging.
+// El aging es SOLO del bloque estudio (honorarios) — las cobranzas reales del estudio.
+export interface EstadoCuenta {
+  cliente_id: string;
+  impuestos: BloqueDeuda;
+  estudio: BloqueDeuda;
+  total: number;
+  aging: Aging;
+  generado_at: string;
+}
+
+// Fila del dashboard global de cobranzas del contador (un cliente con deuda de honorarios).
+export interface CobranzaCliente {
+  cliente_id: string;
+  nombre: string;
+  telefono: string | null;
+  saldo: number;
+  aging: Aging;
+}
+
 export interface JwtPayload {
   id: string;
   email: string;
   role: Role;
   estudio_id: string | null;
+  // NO viaja en el token: la carga `authenticate` desde la DB (getEstadoActivo)
+  // porque puede cambiar durante la sesión. Undefined fuera de un request.
+  condicion_fiscal?: CondicionFiscal | null;
 }
