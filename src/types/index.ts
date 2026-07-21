@@ -229,6 +229,54 @@ export interface Sueldo {
   updated_at: string;
 }
 
+// ── Estado de cuenta / cuenta corriente (no se persiste; se arma en memoria) ──
+export type OrigenDeuda = 'impuesto' | 'honorario';
+
+// Una obligación adeudada (impuesto o honorario) dentro del estado de cuenta.
+export interface DeudaItem {
+  id: string;
+  origen: OrigenDeuda;
+  concepto: string;
+  fecha_vencimiento: string;
+  monto: number;
+  estado: string; // 'pendiente' | 'vencido'
+  dias_vencido: number; // 0 si todavía no venció
+}
+
+export interface BloqueDeuda {
+  items: DeudaItem[];
+  subtotal: number;
+}
+
+// Buckets de antigüedad de deuda. por_vencer = aún no vencida.
+export interface Aging {
+  por_vencer: number;
+  d0_30: number;
+  d31_60: number;
+  d61_90: number;
+  d90_mas: number;
+}
+
+// Estado de cuenta de un cliente: dos bloques (impuestos + estudio) + total + aging.
+// El aging es SOLO del bloque estudio (honorarios) — las cobranzas reales del estudio.
+export interface EstadoCuenta {
+  cliente_id: string;
+  impuestos: BloqueDeuda;
+  estudio: BloqueDeuda;
+  total: number;
+  aging: Aging;
+  generado_at: string;
+}
+
+// Fila del dashboard global de cobranzas del contador (un cliente con deuda de honorarios).
+export interface CobranzaCliente {
+  cliente_id: string;
+  nombre: string;
+  telefono: string | null;
+  saldo: number;
+  aging: Aging;
+}
+
 export interface JwtPayload {
   id: string;
   email: string;

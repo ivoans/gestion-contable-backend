@@ -15,6 +15,7 @@ import configRouter from './routes/config';
 import monotributoRouter from './routes/monotributo';
 import sueldosRouter from './routes/sueldos';
 import pushRouter from './routes/push';
+import cuentaCorrienteRouter, { cobranzasRouter } from './routes/cuentaCorriente';
 import { errorHandler } from './middleware/errorHandler';
 
 export function createApp(): Express {
@@ -60,6 +61,8 @@ export function createApp(): Express {
   app.use('/api/monotributo', monotributoRouter);
   app.use('/api/sueldos', sueldosRouter);
   app.use('/api/push', pushRouter);
+  app.use('/api/cuenta-corriente', cuentaCorrienteRouter);
+  app.use('/api/cobranzas', cobranzasRouter);
 
   // Error handler al FINAL del pipeline: convierte todo error en JSON
   // (Multer, CORS, JSON malformado, etc.). Ver middleware/errorHandler.ts.
